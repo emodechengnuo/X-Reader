@@ -1,4 +1,4 @@
-# READ TOOL 📖
+# X-Reader 📖
 
 **英文 PDF 智能阅读器** — 专为英语学习者打造
 
