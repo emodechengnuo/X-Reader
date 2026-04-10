@@ -614,16 +614,12 @@ class AppState: ObservableObject {
         }
         
         let result = await translationService.translateWithFeedback(selectedText)
-        // error field may hold a fallback-note (text non-empty) or a real failure (text empty)
-        translationError = result.error ?? ""
-        if !result.text.isEmpty {
-            translatedText = result.text
-            // Only cache successful translations without errors (pure success)
-            if result.error == nil {
-                cacheManager.cacheTranslation(key: selectedText, value: result.text)
-            }
-        } else {
+        if let error = result.error {
+            translationError = error
             translatedText = ""
+        } else {
+            translatedText = result.text
+            cacheManager.cacheTranslation(key: selectedText, value: result.text)
         }
         isTranslating = false
     }

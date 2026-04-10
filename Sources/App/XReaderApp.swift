@@ -11,18 +11,13 @@ import SwiftUI
 @main
 struct XReaderApp: App {
     @StateObject private var appState = AppState()
-    @AppStorage("app_language") private var appLanguage: String = AppLanguage.chinese.rawValue
     private static var closeHandler: WindowCloseHandler?
-
-    /// 当前语言（从 appLanguage 派生）
-    private var lang: AppLanguage {
-        AppLanguage(rawValue: appLanguage) ?? .chinese
-    }
 
     var body: some Scene {
         WindowGroup {
             MainView()
                 .environmentObject(appState)
+                .localized()
                 .onAppear {
                     configureWindow()
                 }
@@ -31,7 +26,7 @@ struct XReaderApp: App {
         .defaultSize(width: 1200, height: 800)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button(lang == .chinese ? "打开 PDF…" : "Open PDF...") {
+                Button(L10n.t(.openPDF)) {
                     appState.openPDF()
                 }
                 .keyboardShortcut("o", modifiers: .command)
@@ -40,7 +35,7 @@ struct XReaderApp: App {
                 // Empty — we use our own ToolbarView
             }
             CommandGroup(after: .toolbar) {
-                Button(lang == .chinese ? "进入全屏" : "Enter Fullscreen") {
+                Button(L10n.t(.fullscreen)) {
                     toggleFullscreen()
                 }
                 .keyboardShortcut("f", modifiers: [.control, .command])

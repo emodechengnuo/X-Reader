@@ -12,7 +12,7 @@ struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var l10n = L10n.shared
     @AppStorage("app_language") private var appLanguage: String = AppLanguage.chinese.rawValue
-    @AppStorage("speech_rate") private var speechRate: Double = 1.0
+    @AppStorage("speech_rate") private var speechRate: Double = 0.5
     @AppStorage("default_voice") private var defaultVoice = "american"
     @AppStorage("auto_ocr") private var autoOCR = false
     @AppStorage("close_as_minimize") private var closeAsMinimize = false
@@ -154,7 +154,7 @@ struct SettingsView: View {
                     
                     Picker("", selection: $translationEngineRaw) {
                         ForEach(engines) { engine in
-                            Text(engine.fullDisplayName(lang: l10n.language)).tag(engine.rawValue)
+                            Text(engine.displayName).tag(engine.rawValue)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -166,38 +166,6 @@ struct SettingsView: View {
                 }
                 
                 Divider()
-                
-                // --- Google 翻译说明 ---
-                if translationEngineRaw == "google" {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
-                            Text(t(.googleEngine))
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                        }
-                        Text(t(.googleEngineHint))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                
-                // --- Apple 翻译说明 ---
-                if translationEngineRaw == "apple" {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
-                            Text(t(.appleEngine))
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                        }
-                        Text(t(.appleEngineHint))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
                 
                 // --- Baidu configuration ---
                 if translationEngineRaw == "baidu" {
@@ -231,7 +199,7 @@ struct SettingsView: View {
                                     } else {
                                         Image(systemName: "checkmark.circle")
                                     }
-                                    Text(l10n.language == .chinese ? "测试连接" : "Test Connection")
+                                    Text("测试连接")
                                 }
                             }
                             .disabled(baiduAppId.isEmpty || baiduSecretKey.isEmpty || isTestingBaidu)
@@ -239,7 +207,7 @@ struct SettingsView: View {
                             if !baiduTestResult.isEmpty {
                                 Text(baiduTestResult)
                                     .font(.caption)
-                                    .foregroundColor(baiduTestResult.contains("成功") || baiduTestResult.contains("OK") ? .green : .red)
+                                    .foregroundColor(baiduTestResult.contains("成功") ? .green : .red)
                                     .lineLimit(2)
                             }
                         }
@@ -254,6 +222,17 @@ struct SettingsView: View {
                             Link(t(.baiduRegister), destination: URL(string: "https://fanyi-api.baidu.com/")!)
                                 .font(.caption)
                                 .foregroundColor(.accentColor)
+                        }
+                    }
+                } else {
+                    // Google mode — show simple status
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text("Google 翻译已就绪，无需配置")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
                         }
                     }
                 }
@@ -307,12 +286,8 @@ struct SettingsView: View {
                     
                     HStack {
                         Text(t(.slow))
-                        SpeedSlider(value: $speechRate, range: 0.1...3.0)
+                        Slider(value: $speechRate, in: 0.1...1.0)
                         Text(t(.fast))
-                        Text(String(format: "%.1fx", speechRate))
-                            .foregroundColor(.secondary)
-                            .monospacedDigit()
-                            .frame(width: 40, alignment: .trailing)
                     }
                 }
                 
@@ -358,92 +333,14 @@ struct SettingsView: View {
             let result = await appState.translationService.translateWithFeedback("hello")
             await MainActor.run {
                 isTestingBaidu = false
-                let isChinese = L10n.shared.language == .chinese
                 if let error = result.error {
-                    baiduTestResult = isChinese ? "失败: \(error)" : "Failed: \(error)"
+                    baiduTestResult = "失败: \(error)"
                 } else if !result.text.isEmpty {
-                    baiduTestResult = isChinese ? "成功! hello → \(result.text)" : "OK! hello → \(result.text)"
+                    baiduTestResult = "成功! hello → \(result.text)"
                 } else {
-                    baiduTestResult = isChinese ? "失败: 无翻译结果" : "Failed: empty result"
+                    baiduTestResult = "失败: 无翻译结果"
                 }
             }
         }
-    }
-}
-
-// MARK: - Speed Slider with Default Tick Mark
-struct SpeedSlider: View {
-    @Binding var value: Double
-    let range: ClosedRange<Double>
-
-    private let defaultValue: Double = 0.5
-
-    var body: some View {
-        SpeedSliderCore(value: $value, range: range, defaultValue: defaultValue)
-    }
-}
-
-struct SpeedSliderFloat: View {
-    @Binding var value: Float
-    let range: ClosedRange<Float>
-
-    private let defaultValue: Float = 0.5
-
-    var body: some View {
-        SpeedSliderCore(value: Binding(
-            get: { Double(value) },
-            set: { value = Float($0) }
-        ), range: Double(range.lowerBound)...Double(range.upperBound), defaultValue: Double(defaultValue))
-    }
-}
-
-private struct SpeedSliderCore: View {
-    @Binding var value: Double
-    let range: ClosedRange<Double>
-    let defaultValue: Double
-
-    var body: some View {
-        GeometryReader { geometry in
-            let trackWidth = geometry.size.width
-            let thumbRatio = (value - range.lowerBound) / (range.upperBound - range.lowerBound)
-            let thumbX = thumbRatio * trackWidth
-
-            let defaultRatio = (defaultValue - range.lowerBound) / (range.upperBound - range.lowerBound)
-            let defaultX = defaultRatio * trackWidth
-
-            ZStack(alignment: .leading) {
-                // Track background
-                Capsule()
-                    .fill(Color.primary.opacity(0.15))
-                    .frame(height: 4)
-
-                // Filled track
-                Capsule()
-                    .fill(Color.accentColor)
-                    .frame(width: max(0, thumbX), height: 4)
-
-                // Current value tick mark
-                Rectangle()
-                    .fill(Color.accentColor.opacity(0.5))
-                    .frame(width: 2, height: 10)
-                    .offset(x: thumbX - 1)
-
-                // Thumb
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 16, height: 16)
-                    .offset(x: thumbX - 8)
-            }
-            .frame(height: 20)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { gesture in
-                        let ratio = min(max(gesture.location.x / trackWidth, 0), 1)
-                        value = range.lowerBound + ratio * (range.upperBound - range.lowerBound)
-                    }
-            )
-        }
-        .frame(height: 20)
     }
 }

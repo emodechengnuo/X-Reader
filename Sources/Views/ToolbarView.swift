@@ -127,7 +127,6 @@ struct ToolbarView: View {
 
             // Center: Controls
             HStack(spacing: 6) {
-                // New/Open PDF
                 Button(action: { appState.openPDF() }) {
                     Image(systemName: "folder")
                 }.help(t(.openPdfHelp))
