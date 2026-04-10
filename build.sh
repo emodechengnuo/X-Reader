@@ -18,11 +18,20 @@ echo "🔨 Building $APP_NAME in $MODE mode..."
 
 # 1. Swift 编译
 if [ "$MODE" = "release" ]; then
-    swift build -c release 2>&1 | tail -5
-    BINARY=".build/release/$BUNDLE_NAME"
+ swift build -c release 2>&1 | tail -5
+ # Swift 5.12+ 使用架构目录
+ if [ -d ".build/arm64-apple-macosx/release/$BUNDLE_NAME" ]; then
+ BINARY=".build/arm64-apple-macosx/release/$BUNDLE_NAME"
+ else
+ BINARY=".build/release/$BUNDLE_NAME"
+ fi
 else
-    swift build -c debug 2>&1 | tail -5
-    BINARY=".build/debug/$BUNDLE_NAME"
+ swift build -c debug 2>&1 | tail -5
+ if [ -d ".build/arm64-apple-macosx/debug/$BUNDLE_NAME" ]; then
+ BINARY=".build/arm64-apple-macosx/debug/$BUNDLE_NAME"
+ else
+ BINARY=".build/debug/$BUNDLE_NAME"
+ fi
 fi
 
 echo "✅ Build complete: $BINARY"
