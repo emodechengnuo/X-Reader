@@ -137,6 +137,8 @@ enum L10nKey: String, CaseIterable {
     case modelStatus = "model_status"
     case reloadModel = "reload_model"
     case kokoroDesc = "kokoro_desc"
+    case kokoroDownloading = "kokoro_downloading"
+    case kokoroLoading = "kokoro_loading"
     case defaultVoiceSetting = "default_voice_setting"
     case defaultAccent = "default_accent"
     case americanEnglish = "american_english"
@@ -330,6 +332,8 @@ class L10n: ObservableObject {
         "model_status": "模型状态",
         "reload_model": "重新加载模型",
         "kokoro_desc": "Kokoro 是本地 AI 语音引擎，纯 CoreML 实现，完全离线运行。首次约 99MB，54 种声音。选择带 Kokoro 标记的声音即可使用。",
+        "kokoro_downloading": "下载 Kokoro 语音引擎中...",
+        "kokoro_loading": "加载 Kokoro 语音引擎中...",
         "default_voice_setting": "默认语音",
         "default_accent": "默认发音",
         "american_english": "美式英语 (en-US)",
@@ -498,6 +502,8 @@ class L10n: ObservableObject {
         "model_status": "Model Status",
         "reload_model": "Reload Model",
         "kokoro_desc": "Kokoro is a local AI speech engine built on CoreML, fully offline. ~99MB first download, 54 voices. Select voices marked \"Kokoro AI *\".",
+        "kokoro_downloading": "Downloading Kokoro AI engine...",
+        "kokoro_loading": "Loading Kokoro AI engine...",
         "default_voice_setting": "Default Voice",
         "default_accent": "Default Accent",
         "american_english": "American English (en-US)",

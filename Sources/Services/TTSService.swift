@@ -66,7 +66,9 @@ class TTSService: NSObject, ObservableObject {
 
     /// Kokoro TTS engine (loaded lazily)
     private var kokoroEngine: KokoroEngine?
-    private var isModelLoading: Bool = false
+
+    /// Whether the Kokoro model is currently being loaded/downloaded (published for UI observation)
+    @Published var isKokoroLoading: Bool = false
     /// Timer to auto-release Kokoro model after idle
     private var kokoroReleaseTimer: Timer?
     /// How long to keep Kokoro in memory after last use (seconds)
@@ -216,45 +218,68 @@ class TTSService: NSObject, ObservableObject {
 
     // MARK: - Load Kokoro Model
 
-    @MainActor
-    func loadKokoroModel() async {
-        guard kokoroEngine == nil, !isModelLoading else { return }
-        isModelLoading = true
-        kokoroStatus = "下载模型中..."
-        kokoroProgress = 0
+    nonisolated func loadKokoroModel() async {
+        // Check state before starting
+        var alreadyLoading: Bool = false
+        var engineExists: KokoroEngine?
+        await MainActor.run {
+            engineExists = self.kokoroEngine
+            alreadyLoading = self.isKokoroLoading
+        }
+        guard engineExists == nil, !alreadyLoading else { return }
 
-        let modelDir = KokoroEngine.defaultModelDirectory
+        await MainActor.run { self.isKokoroLoading = true }
+        await MainActor.run { self.kokoroStatus = L10n.shared.string(.kokoroDownloading) }
+        await MainActor.run { self.kokoroProgress = 0 }
 
-        // Download if needed
-        if !KokoroEngine.isDownloaded(at: modelDir) {
-            do {
-                try KokoroEngine.download(to: modelDir) { [weak self] progress in
-                    Task { @MainActor in
-                        self?.kokoroProgress = progress * 0.8
-                        self?.kokoroStatus = "下载模型中... \(Int(progress * 100))%"
+        // Run blocking download + model init on a background thread via Task.detached
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            Task.detached(priority: .userInitiated) { [weak self] in
+                let modelDir = KokoroEngine.defaultModelDirectory
+
+                // Download (synchronous, blocking)
+                if !KokoroEngine.isDownloaded(at: modelDir) {
+                    do {
+                        try KokoroEngine.download(to: modelDir) { progress in
+                            Task { @MainActor in
+                                self?.kokoroProgress = progress * 0.8
+                                self?.kokoroStatus = L10n.shared.string(.kokoroDownloading) + " \(Int(progress * 100))%"
+                            }
+                        }
+                    } catch {
+                        Task { @MainActor in
+                            self?.kokoroStatus = "下载 Kokoro 语音引擎失败"
+                            self?.isKokoroLoading = false
+                        }
+                        print("[TTSService] Kokoro download failed: \(error)")
+                        continuation.resume()
+                        return
                     }
                 }
-            } catch {
-                self.kokoroStatus = "下载失败: \(error.localizedDescription)"
-                self.isModelLoading = false
-                print("[TTSService] Kokoro download failed: \(error)")
-                return
-            }
-        }
 
-        // Load engine
-        kokoroStatus = "加载模型中..."
-        do {
-            let engine = try KokoroEngine(modelDirectory: modelDir)
-            self.kokoroEngine = engine
-            self.kokoroStatus = "已就绪 ✓"
-            self.kokoroProgress = 1.0
-            self.isModelLoading = false
-            print("[TTSService] Kokoro model loaded successfully")
-        } catch {
-            self.kokoroStatus = "加载失败: \(error.localizedDescription)"
-            self.isModelLoading = false
-            print("[TTSService] Kokoro model load failed: \(error)")
+                // Load engine (CPU-intensive: CoreML model compilation — synchronous/blocking)
+                Task { @MainActor in
+                    self?.kokoroStatus = L10n.shared.string(.kokoroLoading)
+                }
+                do {
+                    let engine = try KokoroEngine(modelDirectory: modelDir)
+                    Task { @MainActor in
+                        self?.kokoroEngine = engine
+                        self?.kokoroStatus = "已就绪 ✓"
+                        self?.kokoroProgress = 1.0
+                        self?.isKokoroLoading = false
+                    }
+                    print("[TTSService] Kokoro model loaded successfully")
+                } catch {
+                    Task { @MainActor in
+                        self?.kokoroStatus = "加载失败: \(error.localizedDescription)"
+                        self?.isKokoroLoading = false
+                    }
+                    print("[TTSService] Kokoro model load failed: \(error)")
+                }
+
+                continuation.resume()
+            }
         }
     }
 
@@ -269,7 +294,7 @@ class TTSService: NSObject, ObservableObject {
         kokoroReleaseTimer = nil
         kokoroStatus = "未加载"
         kokoroProgress = 0
-        isModelLoading = false
+        isKokoroLoading = false
         print("[TTSService] Kokoro model unloaded to free memory")
     }
 

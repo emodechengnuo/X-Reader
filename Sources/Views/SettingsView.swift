@@ -290,7 +290,7 @@ struct SettingsView: View {
                             .foregroundColor(appState.ttsService.isKokoroReady ? .green : .secondary)
                     }
                     
-                    if !appState.ttsService.isKokoroReady && appState.ttsService.kokoroStatus.contains("加载中") {
+                    if !appState.ttsService.isKokoroReady && appState.ttsService.isKokoroLoading {
                         ProgressView(value: appState.ttsService.kokoroProgress)
                             .tint(.accentColor)
                     }

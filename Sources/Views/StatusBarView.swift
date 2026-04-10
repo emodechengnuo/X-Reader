@@ -46,6 +46,20 @@ struct StatusBarView: View {
                         .foregroundColor(.accentColor)
                 }
             }
+
+            // Kokoro TTS model download progress
+            if !appState.ttsService.isKokoroReady && appState.ttsService.isKokoroLoading {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                    Text(appState.ttsService.kokoroStatus)
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                    ProgressView(value: appState.ttsService.kokoroProgress)
+                        .frame(width: 60)
+                }
+            }
             
             // OCR progress
             if appState.isOCRRunning {
