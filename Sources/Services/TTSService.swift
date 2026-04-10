@@ -362,7 +362,16 @@ class TTSService: NSObject, ObservableObject {
         }
 
         let utterance = AVSpeechUtterance(string: text)
-        utterance.rate = rate
+        // Slider range: 0.1~2.0, default 1.0
+        // 0.5 = half speed (AVSpeechDefaultSpeechRate ≈ 0.5)
+        // 1.0 = normal speed (AVSpeechDefaultSpeechRate ≈ 0.5)
+        // 2.0 = double speed (AVSpeechMaximumSpeechRate ≈ 1.0)
+        // Linear map: [0.5, 2.0] → [AVSpeechMinimum, AVSpeechMaximum]
+        let factor = Float((AVSpeechUtteranceMaximumSpeechRate - AVSpeechUtteranceMinimumSpeechRate) / (2.0 - 0.5))
+        let mappedRate = min(AVSpeechUtteranceMaximumSpeechRate,
+                             max(AVSpeechUtteranceMinimumSpeechRate,
+                                 AVSpeechUtteranceMinimumSpeechRate + (rate - 0.5) * factor))
+        utterance.rate = mappedRate
         utterance.pitchMultiplier = 1.0
         utterance.volume = 1.0
 
@@ -386,8 +395,12 @@ class TTSService: NSObject, ObservableObject {
         let playerNode = AVAudioPlayerNode()
         let timePitch = AVAudioUnitTimePitch()
 
-        // Map 0.1-3.0 to AVAudioUnitTimePitch rate (0.25 to 4.0)
-        let clampedRate = max(0.25, min(4.0, rate))
+        // Kokoro outputs audio at ~2x speed internally (24000Hz content at 48000Hz).
+        // Slider 0.5 = half speed → timePitch.rate 0.5
+        // Slider 1.0 = normal speed → timePitch.rate 1.0
+        // Slider 2.0 = double speed → timePitch.rate 2.0
+        let kokoroRate = rate
+        let clampedRate = max(0.5, min(4.0, kokoroRate))
         timePitch.rate = clampedRate
 
         engine.attach(playerNode)

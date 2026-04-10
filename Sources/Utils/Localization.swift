@@ -291,7 +291,7 @@ class L10n: ObservableObject {
         "slow": "慢",
         "fast": "快",
         "tts_hint": "选中文字后点击播放即可朗读",
-        "tts_voice_hint": "带「*」标记的为 Kokoro AI 语音，纯 CoreML 离线引擎。",
+        "tts_voice_hint": "推荐选择 Kokoro AI 语音，纯 CoreML 离线引擎。",
         "speaking": "朗读中...",
         
         // Settings
@@ -329,7 +329,7 @@ class L10n: ObservableObject {
         "kokoro_speech": "Kokoro AI 语音",
         "model_status": "模型状态",
         "reload_model": "重新加载模型",
-        "kokoro_desc": "Kokoro 是本地 AI 语音引擎，纯 CoreML 实现，完全离线运行。首次约 99MB，54 种声音。选择带「Kokoro AI *」标记的声音即可使用。",
+        "kokoro_desc": "Kokoro 是本地 AI 语音引擎，纯 CoreML 实现，完全离线运行。首次约 99MB，54 种声音。选择带 Kokoro 标记的声音即可使用。",
         "default_voice_setting": "默认语音",
         "default_accent": "默认发音",
         "american_english": "美式英语 (en-US)",
