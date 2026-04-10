@@ -84,10 +84,7 @@ struct AnalysisPanelView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var l10n = L10n.shared
     @State private var selectedTab: AnalysisTab = .translation
-    @State private var speechRate: Float = {
-        let saved = UserDefaults.standard.float(forKey: "speech_rate")
-        return saved > 0 ? saved : 1.0
-    }()
+    @AppStorage("speech_rate") private var speechRate: Double = 1.0
     // Apple Translation session — uses Locale.Language(languageCode:) which is stable
     @State private var appleTranslationConfig: TranslationSession.Configuration?
     
@@ -175,9 +172,6 @@ struct AnalysisPanelView: View {
                         WordsTabContent()
                     case .tts:
                         TTSTabContent(speechRate: $speechRate)
-                            .onChange(of: speechRate) { newValue in
-                                UserDefaults.standard.set(newValue, forKey: "speech_rate")
-                            }
                     }
                     
                     Spacer(minLength: 40)
@@ -354,7 +348,7 @@ struct WordsTabContent: View {
 struct TTSTabContent: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var l10n = L10n.shared
-    @Binding var speechRate: Float
+    @Binding var speechRate: Double
     
     private func t(_ key: L10nKey) -> String { l10n.string(key) }
     

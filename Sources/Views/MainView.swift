@@ -37,8 +37,10 @@ struct MainView: View {
                     }
                     
                     // Center: PDF Viewer
+                    // Stable id prevents PDFView from being recreated on language change
                     PDFViewerView()
                         .environmentObject(appState)
+                        .id(appState.pdfURL?.absoluteString ?? "empty")
                     
                     // Right: Analysis Panel
                     if appState.showAnalysis {

@@ -59,8 +59,18 @@ struct SettingsView: View {
     private func syncLanguage() {
         let lang = AppLanguage(rawValue: appLanguage) ?? .chinese
         if L10n.shared.language != lang {
+            // Save current page before language change to prevent jump-to-page-1
+            let savedPage = appState.currentPage
+            appState.saveHiddenBookmark()
+
             withAnimation(.easeInOut(duration: 0.2)) {
                 L10n.shared.language = lang
+            }
+
+            // Restore page position after SwiftUI finishes re-rendering
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                guard appState.document != nil else { return }
+                appState.goToPage(savedPage)
             }
         }
     }
@@ -307,7 +317,7 @@ struct SettingsView: View {
                     
                     HStack {
                         Text(t(.slow))
-                        Slider(value: $speechRate, in: 0.1...3.0, step: 0.05)
+                        Slider(value: $speechRate, in: 0.1...2.0, step: 0.05)
                         Text(t(.fast))
                         Text(String(format: "%.1fx", speechRate))
                             .foregroundColor(.secondary)

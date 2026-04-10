@@ -93,12 +93,12 @@ final class MenuRefresher {
  func register(appState: AppState) {
  // 监听语言变化，直接用 AppKit 更新菜单标题
  observer = NotificationCenter.default.addObserver(
- forName: .L10nLanguageChanged,
- object: nil,
- queue: .main
- ) { [weak self] _ in
- self?.refreshMenuTitles()
- }
+   forName: .L10nLanguageChanged,
+   object: nil,
+   queue: .main
+) { [weak self] _ in
+   self?.refreshMenuTitles()
+}
  }
 
  func refreshMenuTitles() {
@@ -160,7 +160,8 @@ private class WindowCloseHandler: NSObject {
  } else {
  // Quit app — set flag to prevent PDFView teardown from overwriting bookmark
  AppState.shared?.isTerminating = true
- NSApp.terminate(nil)
+NSApp.terminate(nil)
+   }
  }
- }
+}
 }
