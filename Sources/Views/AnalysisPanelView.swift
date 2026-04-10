@@ -7,12 +7,15 @@
 
 
 import SwiftUI
+import Translation
 
 struct AnalysisPanelView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var l10n = L10n.shared
     @State private var selectedTab: AnalysisTab = .translation
-    @State private var speechRate: Float = 0.5
+    @AppStorage("speech_rate") private var speechRate: Float = 1.0
+    // Apple Translation Session
+    @State private var appleTranslationConfig: TranslationSession.Configuration?
     
     private func t(_ key: L10nKey) -> String { l10n.string(key) }
     
@@ -105,6 +108,16 @@ struct AnalysisPanelView: View {
             }
         }
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
+        .translationTask(appleTranslationConfig) { session in
+            appState.translationService.setAppleSession(session)
+        }
+        .onAppear {
+            // 初始化 Apple Translation session（英文→中文）
+            appleTranslationConfig = TranslationSession.Configuration(
+                source: Locale.Language(identifier: "en"),
+                target: Locale.Language(identifier: "zh-Hans")
+            )
+        }
     }
 }
 
@@ -113,11 +126,52 @@ struct AnalysisPanelView: View {
 struct TranslationTabContent: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var l10n = L10n.shared
+    @AppStorage("translation_engine") private var translationEngineRaw: String = "google"
     
     private func t(_ key: L10nKey) -> String { l10n.string(key) }
     
+    private var engines: [TranslationService.Engine] { TranslationService.Engine.allCases }
+    
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            
+            // ── 引擎快速切换 ──
+            VStack(alignment: .leading, spacing: 4) {
+                Text(t(.engineLabel))
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                
+                HStack(spacing: 4) {
+                    ForEach(engines) { engine in
+                        let isSelected = translationEngineRaw == engine.rawValue
+                        Button(action: {
+                            translationEngineRaw = engine.rawValue
+                            // 立刻用新引擎重新翻译
+                            if !appState.selectedText.isEmpty {
+                                Task { await appState.translateSelectedText() }
+                            }
+                        }) {
+                            Text(engineShortName(engine))
+                                .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                                .foregroundColor(isSelected ? .white : .primary)
+                                .padding(.vertical, 4)
+                                .frame(maxWidth: .infinity)
+                                .background(isSelected ? Color.accentColor : Color(nsColor: .controlBackgroundColor))
+                                .cornerRadius(5)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 5)
+                                        .stroke(isSelected ? Color.accentColor : Color.secondary.opacity(0.25), lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+            }
+            .padding(8)
+            .background(Color(nsColor: .textBackgroundColor))
+            .cornerRadius(8)
+            
+            // ── 翻译结果 ──
             if appState.isTranslating {
                 HStack {
                     ProgressView()
@@ -134,17 +188,7 @@ struct TranslationTabContent: View {
                         Text(t(.translatedResult))
                             .font(.caption)
                             .fontWeight(.semibold)
-                        
                         Spacer()
-                        
-                        // Engine badge
-                        Text(appState.translationService.currentEngine.displayName)
-                            .font(.system(size: 9))
-                            .foregroundColor(.accentColor)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.accentColor.opacity(0.1))
-                            .cornerRadius(3)
                     }
                     
                     Text(appState.translatedText)
@@ -154,18 +198,31 @@ struct TranslationTabContent: View {
                         .background(Color(nsColor: .textBackgroundColor))
                         .cornerRadius(8)
                         .lineSpacing(4)
+                    
+                    // Show fallback note (e.g. "[谷歌在线 失败，已自动切换至 苹果本地]")
+                    if !appState.translationError.isEmpty {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 9))
+                                .foregroundColor(.orange)
+                            Text(appState.translationError)
+                                .font(.system(size: 10))
+                                .foregroundColor(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.horizontal, 4)
+                    }
                 }
             } else if !appState.translationError.isEmpty {
-                // Show translation error
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.caption)
-                            .foregroundColor(.orange)
-                        Text("翻译错误")
+                            .foregroundColor(.red)
+                        Text(t(.translationError))
                             .font(.caption)
                             .fontWeight(.semibold)
-                            .foregroundColor(.orange)
+                            .foregroundColor(.red)
                     }
                     
                     Text(appState.translationError)
@@ -173,7 +230,7 @@ struct TranslationTabContent: View {
                         .foregroundColor(.secondary)
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.orange.opacity(0.05))
+                        .background(Color.red.opacity(0.05))
                         .cornerRadius(8)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -185,9 +242,14 @@ struct TranslationTabContent: View {
                 Text(t(.selectTextHint))
                     .font(.subheadline)
                     .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 100)
+                    .frame(maxWidth: .infinity, minHeight: 80)
             }
         }
+    }
+    
+    /// 面板切换按钮短名称（与设置页一致）
+    private func engineShortName(_ engine: TranslationService.Engine) -> String {
+        engine.displayName(lang: l10n.language)
     }
 }
 
@@ -264,16 +326,6 @@ struct TTSTabContent: View {
                         .fontWeight(.semibold)
                     
                     Spacer()
-                    
-                    if !appState.selectedVoiceName.isEmpty {
-                        Text(appState.selectedVoiceName)
-                            .font(.system(size: 9))
-                            .foregroundColor(.accentColor)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.accentColor.opacity(0.1))
-                            .cornerRadius(3)
-                    }
                 }
                 
                 Picker("", selection: Binding(
@@ -312,38 +364,25 @@ struct TTSTabContent: View {
             .background(Color(nsColor: .textBackgroundColor))
             .cornerRadius(8)
             
-            // Play controls
-            HStack(spacing: 20) {
-                Button(action: {
-                    if appState.isSpeaking {
-                        appState.stopSpeaking()
-                    } else {
-                        appState.startSpeaking()
-                    }
-                }) {
-                    Image(systemName: appState.isSpeaking ? "stop.fill" : "play.fill")
-                        .font(.title2)
-                        .foregroundColor(.accentColor)
+            VStack(spacing: 4) {
+                HStack {
+                    Image(systemName: "tortoise")
+                        .font(.caption)
+                    SpeedSliderFloat(value: $speechRate, range: 0.1...3.0)
+                        .frame(maxWidth: .infinity)
+                    Image(systemName: "hare")
+                        .font(.caption)
                 }
-                .buttonStyle(.borderless)
-                .disabled(appState.selectedText.isEmpty)
-                
-                VStack(spacing: 4) {
-                    Text(t(.speed))
+                HStack(spacing: 2) {
+                    Text("语速")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    HStack(spacing: 8) {
-                        Image(systemName: "tortoise")
-                            .font(.caption)
-                        Slider(value: $speechRate, in: 0.1...1.0)
-                        Image(systemName: "hare")
-                            .font(.caption)
-                    }
+                    Text(String(format: "%.1fx", speechRate))
+                        .font(.caption.bold())
+                        .foregroundColor(.primary)
+                        .monospacedDigit()
                 }
             }
-            .padding(10)
-            .background(Color(nsColor: .textBackgroundColor))
-            .cornerRadius(8)
             
             if appState.selectedText.isEmpty {
                 Text(t(.ttsHint))

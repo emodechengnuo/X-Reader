@@ -87,7 +87,10 @@ struct PDFViewerView: NSViewRepresentable {
     }
 
     func updateNSView(_ pdfView: XReaderPDFView, context: Context) {
-        pdfView.document = appState.document
+        // Only update document reference if it actually changed — prevents page reset
+        if pdfView.document !== appState.document {
+            pdfView.document = appState.document
+        }
 
         // Handle pending target page when document changes
         if let targetPage = appState.pendingTargetPage,
