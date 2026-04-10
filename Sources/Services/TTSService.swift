@@ -62,6 +62,7 @@ class TTSService: NSObject, ObservableObject {
     private var words: [String] = []
     private var currentWordIndex: Int = 0
     private var currentUtteranceText: String = ""
+    private var currentPlaybackRate: Float = 1.0
 
     /// Kokoro TTS engine (loaded lazily)
     private var kokoroEngine: KokoroEngine?
@@ -135,7 +136,7 @@ class TTSService: NSObject, ObservableObject {
             voices.append(VoiceOption(
                 id: voice.id,
                 name: voice.name,
-                quality: "Kokoro AI ⭐",
+                quality: "Kokoro AI",
                 language: voice.id.contains("bf_") || voice.id.contains("bm_") ? "en-GB" : "en-US",
                 isKokoro: true
             ))
@@ -286,12 +287,23 @@ class TTSService: NSObject, ObservableObject {
 
     func speak(
         _ text: String,
-        rate: Float = AVSpeechUtteranceDefaultSpeechRate,
+        rate: Float? = nil,
         voiceIdentifier: String? = nil,
         onProgress: ((Bool, Int) -> Void)? = nil
     ) {
         stop()
         speakingCallback = onProgress
+        
+        // Read rate from UserDefaults if not provided
+        let actualRate: Float
+        if let rate = rate {
+            actualRate = rate
+        } else {
+            let saved = UserDefaults.standard.double(forKey: "speech_rate")
+            actualRate = saved > 0 ? Float(saved) : 1.0
+        }
+        
+        currentPlaybackRate = actualRate
 
         // Check if using Kokoro voice
         if let voiceId = voiceIdentifier, voiceId.hasPrefix("kokoro:") {
@@ -300,14 +312,14 @@ class TTSService: NSObject, ObservableObject {
         }
 
         // Fall back to AVSpeechSynthesis
-        speakWithSystemVoice(text: text, voiceIdentifier: voiceIdentifier)
+        speakWithSystemVoice(text: text, voiceIdentifier: voiceIdentifier, rate: actualRate)
     }
 
     /// Speak using Kokoro TTS
     private func speakWithKokoro(text: String, voiceId: String) {
         guard let engine = kokoroEngine else {
             print("[TTSService] Kokoro model not ready, falling back to system voice")
-            speakWithSystemVoice(text: text, voiceIdentifier: nil)
+            speakWithSystemVoice(text: text, voiceIdentifier: nil, rate: currentPlaybackRate)
             return
         }
 
@@ -319,8 +331,8 @@ class TTSService: NSObject, ObservableObject {
                 let result = try engine.synthesize(text: text, voice: voiceName)
                 speakingCallback?(true, 0)
 
-                // Play audio samples
-                try playAudioSamples(result.samples)
+                // Play audio samples with rate control
+                try playAudioSamples(result.samples, rate: currentPlaybackRate)
 
                 speakingCallback?(false, 0)
                 // Schedule model release after idle period
@@ -328,13 +340,13 @@ class TTSService: NSObject, ObservableObject {
             } catch {
                 print("[TTSService] Kokoro synthesis failed: \(error)")
                 // Fall back to system voice
-                speakWithSystemVoice(text: text, voiceIdentifier: nil)
+                speakWithSystemVoice(text: text, voiceIdentifier: nil, rate: currentPlaybackRate)
             }
         }
     }
 
     /// Speak using AVSpeechSynthesis (fallback)
-    private func speakWithSystemVoice(text: String, voiceIdentifier: String?) {
+    private func speakWithSystemVoice(text: String, voiceIdentifier: String?, rate: Float) {
         words = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
         currentWordIndex = 0
 
@@ -350,7 +362,7 @@ class TTSService: NSObject, ObservableObject {
         }
 
         let utterance = AVSpeechUtterance(string: text)
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        utterance.rate = rate
         utterance.pitchMultiplier = 1.0
         utterance.volume = 1.0
 
@@ -365,17 +377,26 @@ class TTSService: NSObject, ObservableObject {
         synthesizer.speak(utterance)
     }
 
-    /// Play audio samples through AVAudioEngine
-    private func playAudioSamples(_ samples: [Float]) throws {
+    /// Play audio samples through AVAudioEngine with rate control
+    private func playAudioSamples(_ samples: [Float], rate: Float) throws {
         // Stop any existing audio engine
         stopAudioEngine()
 
         let engine = AVAudioEngine()
         let playerNode = AVAudioPlayerNode()
+        let timePitch = AVAudioUnitTimePitch()
+        
+        // Map 0.1-3.0 to AVAudioUnitTimePitch rate (0.25 to 4.0)
+        // rate=1.0 → rateFactor=1.0, rate=0.5 → rateFactor=0.5, rate=2.0 → rateFactor=2.0
+        let clampedRate = max(0.25, min(4.0, rate))
+        timePitch.rate = clampedRate
+
         engine.attach(playerNode)
+        engine.attach(timePitch)
 
         let format = AVAudioFormat(standardFormatWithSampleRate: 24000, channels: 1)!
-        engine.connect(playerNode, to: engine.mainMixerNode, format: format)
+        engine.connect(playerNode, to: timePitch, format: format)
+        engine.connect(timePitch, to: engine.mainMixerNode, format: format)
 
         try engine.start()
 

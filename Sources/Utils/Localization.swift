@@ -70,6 +70,11 @@ enum L10nKey: String, CaseIterable {
     case translatedResult = "translated_result"
     case engineLabel = "engine_label"
     case googleEngine = "google_engine"
+    case googleEngineHint = "google_engine_hint"
+    case appleEngine = "apple_engine"
+    case appleEngineHint = "apple_engine_hint"
+    case translationError = "translation_error"
+    case translationFallback = "translation_fallback"
     
     // Grammar panel
     case sentenceStructure = "sentence_structure"
@@ -248,6 +253,11 @@ class L10n: ObservableObject {
         "translated_result": "中文翻译",
         "engine_label": "引擎",
         "google_engine": "Google 翻译",
+        "google_engine_hint": "使用 Google 翻译服务，需要联网",
+        "apple_engine": "Apple 翻译",
+        "apple_engine_hint": "使用系统原生翻译，无需联网，速度更快",
+        "translation_error": "翻译失败",
+        "translation_fallback": "已切换引擎",
         
         // Grammar
         "sentence_structure": "句子结构",
@@ -271,7 +281,7 @@ class L10n: ObservableObject {
         "slow": "慢",
         "fast": "快",
         "tts_hint": "选中文字后点击播放即可朗读",
-        "tts_voice_hint": "带「⭐」标记的为 Kokoro AI 语音，纯 CoreML 离线引擎。",
+        "tts_voice_hint": "Kokoro AI 语音，纯 CoreML 离线引擎。",
         "speaking": "朗读中...",
         
         // Settings
@@ -296,7 +306,7 @@ class L10n: ObservableObject {
         // Translation settings
         "translation_engine": "翻译引擎",
         "select_engine": "选择引擎",
-        "translation_hint": "Google 翻译无需配置；百度翻译需注册获取 API Key",
+        "translation_hint": "Apple 翻译：系统原生，无需配置；Google/百度：需要联网",
         "baidu_config": "百度翻译配置",
         "baidu_appid": "App ID",
         "baidu_secretkey": "密钥 (Secret Key)",
@@ -309,7 +319,7 @@ class L10n: ObservableObject {
         "kokoro_speech": "Kokoro AI 语音",
         "model_status": "模型状态",
         "reload_model": "重新加载模型",
-        "kokoro_desc": "Kokoro 是本地 AI 语音引擎，纯 CoreML 实现，完全离线运行。首次约 99MB，54 种声音。选择带「Kokoro AI ⭐」标记的声音即可使用。",
+        "kokoro_desc": "Kokoro 是本地 AI 语音引擎，纯 CoreML 实现，完全离线运行。首次约 99MB，54 种声音。选择任意 Kokoro AI 语音即可使用。",
         "default_voice_setting": "默认语音",
         "default_accent": "默认发音",
         "american_english": "美式英语 (en-US)",
@@ -411,6 +421,11 @@ class L10n: ObservableObject {
         "translated_result": "Chinese Translation",
         "engine_label": "Engine",
         "google_engine": "Google Translate",
+        "google_engine_hint": "Uses Google Translate service, requires internet connection",
+        "apple_engine": "Apple Translate",
+        "apple_engine_hint": "System native translation, works offline, faster",
+        "translation_error": "Translation Failed",
+        "translation_fallback": "Engine Switched",
         
         // Grammar
         "sentence_structure": "Sentence Structure",
@@ -434,7 +449,7 @@ class L10n: ObservableObject {
         "slow": "Slow",
         "fast": "Fast",
         "tts_hint": "Select text then press play to listen",
-        "tts_voice_hint": "⭐ marks Kokoro AI voices — CoreML offline engine.",
+        "tts_voice_hint": "Kokoro AI voices — CoreML offline engine.",
         "speaking": "Speaking...",
         
         // Settings
@@ -459,7 +474,7 @@ class L10n: ObservableObject {
         // Translation settings
         "translation_engine": "Translation Engine",
         "select_engine": "Select Engine",
-        "translation_hint": "Google: no config needed; Baidu: requires API key registration",
+        "translation_hint": "Apple: native, no config needed; Google/Baidu: requires internet",
         "baidu_config": "Baidu Translate Config",
         "baidu_appid": "App ID",
         "baidu_secretkey": "Secret Key",
@@ -472,7 +487,7 @@ class L10n: ObservableObject {
         "kokoro_speech": "Kokoro AI Speech",
         "model_status": "Model Status",
         "reload_model": "Reload Model",
-        "kokoro_desc": "Kokoro is a local AI speech engine built on CoreML, fully offline. ~99MB first download, 54 voices. Select voices marked \"Kokoro AI ⭐\".",
+        "kokoro_desc": "Kokoro is a local AI speech engine built on CoreML, fully offline. ~99MB first download, 54 voices. Select any Kokoro AI voice to use.",
         "default_voice_setting": "Default Voice",
         "default_accent": "Default Accent",
         "american_english": "American English (en-US)",
