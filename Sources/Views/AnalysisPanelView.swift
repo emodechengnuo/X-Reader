@@ -7,12 +7,89 @@
 
 
 import SwiftUI
+import Translation
+
+// MARK: - 自定义刻度滑块：刻度与滑轨底部齐平
+struct SliderWithTicks: View {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    var onChanged: ((Double) -> Void)? = nil
+
+    private let tickCount = 8  // 刻度数
+    private let trackHeight: CGFloat = 8
+    private let tickLength: CGFloat = 6
+
+    var body: some View {
+        GeometryReader { geo in
+            let trackWidth = geo.size.width
+            let normalizedValue = (value - range.lowerBound) / (range.upperBound - range.lowerBound)
+            let thumbX = normalizedValue * trackWidth
+
+            ZStack(alignment: .leading) {
+                // 滑轨背景
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .frame(height: trackHeight)
+                    .padding(.vertical, tickLength)  // 上下留出刻度空间
+
+                // 刻度线
+                ForEach(0..<tickCount, id: \.self) { i in
+                    let t = Double(i) / Double(tickCount - 1)
+                    let x = t * trackWidth - 0.5  // 0.5pt 线宽居中
+
+                    VStack(spacing: 0) {
+                        Rectangle()
+                            .fill(Color.secondary.opacity(0.3))
+                            .frame(width: 1, height: tickLength)
+                        Spacer()
+                    }
+                    .frame(width: trackWidth, height: trackHeight + tickLength * 2)
+                    .offset(x: x)
+                }
+
+                // 选中滑轨（左边填充）
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.accentColor)
+                    .frame(width: thumbX, height: trackHeight)
+                    .padding(.vertical, tickLength)
+
+                // 滑块（thumb）
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 14, height: 14)
+                    .shadow(color: .black.opacity(0.15), radius: 2, y: 1)
+                    .offset(x: thumbX - 7)
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { gesture in
+                                let clamped = min(max(gesture.location.x / trackWidth, 0), 1)
+                                let raw = range.lowerBound + clamped * (range.upperBound - range.lowerBound)
+                                // 按 step 吸附
+                                let snapped = round(raw / step) * step
+                                let newValue = min(max(snapped, range.lowerBound), range.upperBound)
+                                if newValue != value {
+                                    value = newValue
+                                    onChanged?(newValue)
+                                }
+                            }
+                    )
+            }
+        }
+        .frame(height: 20 + tickLength * 2)
+    }
+}
 
 struct AnalysisPanelView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var l10n = L10n.shared
     @State private var selectedTab: AnalysisTab = .translation
-    @State private var speechRate: Float = 0.5
+    @State private var speechRate: Float = {
+        let saved = UserDefaults.standard.float(forKey: "speech_rate")
+        return saved > 0 ? saved : 1.0
+    }()
+    // Apple Translation session — uses Locale.Language(languageCode:) which is stable
+    @State private var appleTranslationConfig: TranslationSession.Configuration?
     
     private func t(_ key: L10nKey) -> String { l10n.string(key) }
     
@@ -93,16 +170,30 @@ struct AnalysisPanelView: View {
                     switch selectedTab {
                     case .translation:
                         TranslationTabContent()
+                            .environmentObject(appState.translationService)
                     case .words:
                         WordsTabContent()
                     case .tts:
                         TTSTabContent(speechRate: $speechRate)
+                            .onChange(of: speechRate) { newValue in
+                                UserDefaults.standard.set(newValue, forKey: "speech_rate")
+                            }
                     }
                     
                     Spacer(minLength: 40)
                 }
                 .padding(12)
             }
+        }
+        // Apple Translation: session init with correct Locale.Language(languageCode:) API
+        .translationTask(appleTranslationConfig) { session in
+            appState.translationService.setAppleSession(session)
+        }
+        .onAppear {
+            appleTranslationConfig = TranslationSession.Configuration(
+                source: Locale.Language(languageCode: .english),
+                target: Locale.Language(languageCode: .chinese)
+            )
         }
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
     }
@@ -112,12 +203,42 @@ struct AnalysisPanelView: View {
 
 struct TranslationTabContent: View {
     @EnvironmentObject var appState: AppState
+    @EnvironmentObject var translationService: TranslationService
     @ObservedObject private var l10n = L10n.shared
     
     private func t(_ key: L10nKey) -> String { l10n.string(key) }
     
+    private var engines: [TranslationService.Engine] { Array(TranslationService.Engine.allCases) }
+    
+    /// Short display name for engine picker button
+    private func engineShortName(_ engine: TranslationService.Engine) -> String {
+        engine.fullDisplayName(lang: l10n.language)
+    }
+    
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            // Engine picker
+            HStack(spacing: 4) {
+                ForEach(engines) { engine in
+                    let isSelected = translationService.currentEngine == engine
+                    Button(action: {
+                        translationService.currentEngine = engine
+                        if !appState.selectedText.isEmpty {
+                            Task { await appState.translateSelectedText() }
+                        }
+                    }) {
+                        Text(engineShortName(engine))
+                            .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                            .foregroundColor(isSelected ? .white : .primary)
+                            .padding(.vertical, 4)
+                            .frame(maxWidth: .infinity)
+                            .background(isSelected ? Color.accentColor : Color(nsColor: .controlBackgroundColor))
+                            .cornerRadius(5)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            
             if appState.isTranslating {
                 HStack {
                     ProgressView()
@@ -134,17 +255,6 @@ struct TranslationTabContent: View {
                         Text(t(.translatedResult))
                             .font(.caption)
                             .fontWeight(.semibold)
-                        
-                        Spacer()
-                        
-                        // Engine badge
-                        Text(appState.translationService.currentEngine.displayName)
-                            .font(.system(size: 9))
-                            .foregroundColor(.accentColor)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.accentColor.opacity(0.1))
-                            .cornerRadius(3)
                     }
                     
                     Text(appState.translatedText)
@@ -264,16 +374,6 @@ struct TTSTabContent: View {
                         .fontWeight(.semibold)
                     
                     Spacer()
-                    
-                    if !appState.selectedVoiceName.isEmpty {
-                        Text(appState.selectedVoiceName)
-                            .font(.system(size: 9))
-                            .foregroundColor(.accentColor)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.accentColor.opacity(0.1))
-                            .cornerRadius(3)
-                    }
                 }
                 
                 Picker("", selection: Binding(
@@ -313,36 +413,48 @@ struct TTSTabContent: View {
             .cornerRadius(8)
             
             // Play controls
-            HStack(spacing: 20) {
-                Button(action: {
-                    if appState.isSpeaking {
-                        appState.stopSpeaking()
-                    } else {
-                        appState.startSpeaking()
-                    }
-                }) {
-                    Image(systemName: appState.isSpeaking ? "stop.fill" : "play.fill")
-                        .font(.title2)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Image(systemName: "gauge.with.dots.needle.bottom.50percent")
+                        .font(.caption)
                         .foregroundColor(.accentColor)
-                }
-                .buttonStyle(.borderless)
-                .disabled(appState.selectedText.isEmpty)
-                
-                VStack(spacing: 4) {
                     Text(t(.speed))
                         .font(.caption)
-                        .foregroundColor(.secondary)
+                        .fontWeight(.semibold)
+                    Spacer()
+                }
+                
+                HStack(spacing: 20) {
+                    Button(action: {
+                        if appState.isSpeaking {
+                            appState.stopSpeaking()
+                        } else {
+                            appState.startSpeaking()
+                        }
+                    }) {
+                        Image(systemName: appState.isSpeaking ? "stop.fill" : "play.fill")
+                            .font(.title2)
+                            .foregroundColor(.accentColor)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(appState.selectedText.isEmpty)
+                    
                     HStack(spacing: 8) {
                         Image(systemName: "tortoise")
                             .font(.caption)
-                        Slider(value: $speechRate, in: 0.1...1.0)
+                        Slider(value: $speechRate, in: 0.1...2.0, step: 0.05)
+                            .frame(maxWidth: .infinity)
                         Image(systemName: "hare")
                             .font(.caption)
+                        Text(String(format: "%.1fx", speechRate))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .frame(width: 34, alignment: .trailing)
                     }
                 }
             }
             .padding(10)
-            .background(Color(nsColor: .textBackgroundColor))
+            .background(.ultraThinMaterial)
             .cornerRadius(8)
             
             if appState.selectedText.isEmpty {

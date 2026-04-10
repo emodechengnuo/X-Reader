@@ -12,7 +12,7 @@ struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var l10n = L10n.shared
     @AppStorage("app_language") private var appLanguage: String = AppLanguage.chinese.rawValue
-    @AppStorage("speech_rate") private var speechRate: Double = 0.5
+    @AppStorage("speech_rate") private var speechRate: Double = 1.0
     @AppStorage("default_voice") private var defaultVoice = "american"
     @AppStorage("auto_ocr") private var autoOCR = false
     @AppStorage("close_as_minimize") private var closeAsMinimize = false
@@ -87,7 +87,7 @@ struct SettingsView: View {
                 
                 // --- Theme ---
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(t(.languageSetting).contains("语言") ? "外观主题" : "Appearance")
+                    Text(t(.appearanceSetting))
                         .font(.headline)
                     
                     HStack(spacing: 6) {
@@ -154,7 +154,7 @@ struct SettingsView: View {
                     
                     Picker("", selection: $translationEngineRaw) {
                         ForEach(engines) { engine in
-                            Text(engine.displayName).tag(engine.rawValue)
+                            Text(engine.fullDisplayName(lang: l10n.language)).tag(engine.rawValue)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -166,6 +166,38 @@ struct SettingsView: View {
                 }
                 
                 Divider()
+                
+                // --- Google 翻译说明 ---
+                if translationEngineRaw == "google" {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text(t(.googleEngine))
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        Text(t(.googleEngineHint))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                // --- Apple 翻译说明 ---
+                if translationEngineRaw == "apple" {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text(t(.appleEngine))
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        Text(t(.appleEngineHint))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
                 
                 // --- Baidu configuration ---
                 if translationEngineRaw == "baidu" {
@@ -199,7 +231,7 @@ struct SettingsView: View {
                                     } else {
                                         Image(systemName: "checkmark.circle")
                                     }
-                                    Text("测试连接")
+                                    Text(l10n.language == .chinese ? "测试连接" : "Test Connection")
                                 }
                             }
                             .disabled(baiduAppId.isEmpty || baiduSecretKey.isEmpty || isTestingBaidu)
@@ -207,7 +239,7 @@ struct SettingsView: View {
                             if !baiduTestResult.isEmpty {
                                 Text(baiduTestResult)
                                     .font(.caption)
-                                    .foregroundColor(baiduTestResult.contains("成功") ? .green : .red)
+                                    .foregroundColor(baiduTestResult.contains("成功") || baiduTestResult.contains("OK") ? .green : .red)
                                     .lineLimit(2)
                             }
                         }
@@ -222,17 +254,6 @@ struct SettingsView: View {
                             Link(t(.baiduRegister), destination: URL(string: "https://fanyi-api.baidu.com/")!)
                                 .font(.caption)
                                 .foregroundColor(.accentColor)
-                        }
-                    }
-                } else {
-                    // Google mode — show simple status
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
-                            Text("Google 翻译已就绪，无需配置")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
                         }
                     }
                 }
@@ -286,8 +307,12 @@ struct SettingsView: View {
                     
                     HStack {
                         Text(t(.slow))
-                        Slider(value: $speechRate, in: 0.1...1.0)
+                        Slider(value: $speechRate, in: 0.1...3.0, step: 0.05)
                         Text(t(.fast))
+                        Text(String(format: "%.1fx", speechRate))
+                            .foregroundColor(.secondary)
+                            .monospacedDigit()
+                            .frame(width: 40, alignment: .trailing)
                     }
                 }
                 
@@ -333,14 +358,17 @@ struct SettingsView: View {
             let result = await appState.translationService.translateWithFeedback("hello")
             await MainActor.run {
                 isTestingBaidu = false
+                let isChinese = L10n.shared.language == .chinese
                 if let error = result.error {
-                    baiduTestResult = "失败: \(error)"
+                    baiduTestResult = isChinese ? "失败: \(error)" : "Failed: \(error)"
                 } else if !result.text.isEmpty {
-                    baiduTestResult = "成功! hello → \(result.text)"
+                    baiduTestResult = isChinese ? "成功! hello → \(result.text)" : "OK! hello → \(result.text)"
                 } else {
-                    baiduTestResult = "失败: 无翻译结果"
+                    baiduTestResult = isChinese ? "失败: 无翻译结果" : "Failed: empty result"
                 }
             }
         }
     }
 }
+
+// MARK: - Speed Slider with Default Tick Mark

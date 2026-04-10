@@ -103,7 +103,7 @@ class TTSService: NSObject, ObservableObject {
         var priority: Int {
             if isKokoro { return 0 }
             switch quality {
-            case "Siri ⭐": return 1
+            case "Siri *": return 1
             case "Premium": return 2
             case "Enhanced": return 3
             case "Default": return 4
@@ -136,7 +136,7 @@ class TTSService: NSObject, ObservableObject {
             voices.append(VoiceOption(
                 id: voice.id,
                 name: voice.name,
-                quality: "Kokoro AI",
+                quality: "Kokoro AI ⭐",
                 language: voice.id.contains("bf_") || voice.id.contains("bm_") ? "en-GB" : "en-US",
                 isKokoro: true
             ))
@@ -169,7 +169,7 @@ class TTSService: NSObject, ObservableObject {
                 let identifier = voice.identifier.lowercased()
 
                 if identifier.contains("siri") {
-                    quality = "Siri ⭐"
+                    quality = "Siri *"
                 } else if identifier.contains("premium") {
                     quality = "Premium"
                 } else if identifier.contains("enhanced") {
@@ -293,7 +293,7 @@ class TTSService: NSObject, ObservableObject {
     ) {
         stop()
         speakingCallback = onProgress
-        
+
         // Read rate from UserDefaults if not provided
         let actualRate: Float
         if let rate = rate {
@@ -302,7 +302,7 @@ class TTSService: NSObject, ObservableObject {
             let saved = UserDefaults.standard.double(forKey: "speech_rate")
             actualRate = saved > 0 ? Float(saved) : 1.0
         }
-        
+
         currentPlaybackRate = actualRate
 
         // Check if using Kokoro voice
@@ -385,9 +385,8 @@ class TTSService: NSObject, ObservableObject {
         let engine = AVAudioEngine()
         let playerNode = AVAudioPlayerNode()
         let timePitch = AVAudioUnitTimePitch()
-        
+
         // Map 0.1-3.0 to AVAudioUnitTimePitch rate (0.25 to 4.0)
-        // rate=1.0 → rateFactor=1.0, rate=0.5 → rateFactor=0.5, rate=2.0 → rateFactor=2.0
         let clampedRate = max(0.25, min(4.0, rate))
         timePitch.rate = clampedRate
 

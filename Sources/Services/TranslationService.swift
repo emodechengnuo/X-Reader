@@ -2,30 +2,65 @@
 //  TranslationService.swift
 //  X-Reader
 //
-//  Translation via Google Translate & Baidu Translate
+//  Translation via Apple Translation, Google Translate & Baidu Translate
 //
 
 
 import Foundation
 import CryptoKit
+import Translation
 
 class TranslationService: ObservableObject {
     
     // MARK: - Engine Selection
     
     enum Engine: String, CaseIterable, Identifiable {
+        case apple = "apple"
         case google = "google"
         case baidu = "baidu"
         
         var id: String { rawValue }
         
-        var displayName: String {
-            switch self {
-            case .google: return "Google 翻译"
-            case .baidu: return "百度翻译"
+        /// 本地化显示名（中文：苹果本地/谷歌在线/百度在线；英文：Apple/Google/Baidu）
+        func displayName(lang: AppLanguage = L10n.shared.language) -> String {
+            switch lang {
+            case .chinese:
+                switch self {
+                case .apple:  return "苹果本地"
+                case .google: return "谷歌在线"
+                case .baidu:  return "百度在线"
+                }
+            case .english:
+                switch self {
+                case .apple:  return "Apple"
+                case .google: return "Google"
+                case .baidu:  return "Baidu"
+                }
+            }
+        }
+        
+        /// 设置页 Picker 所用的完整名称
+        func fullDisplayName(lang: AppLanguage = L10n.shared.language) -> String {
+            switch lang {
+            case .chinese:
+                switch self {
+                case .apple:  return "苹果本地"
+                case .google: return "谷歌在线"
+                case .baidu:  return "百度在线"
+                }
+            case .english:
+                switch self {
+                case .apple:  return "Apple (Local)"
+                case .google: return "Google (Online)"
+                case .baidu:  return "Baidu (Online)"
+                }
             }
         }
     }
+    
+    // MARK: - Apple Translation Session (macOS 15+)
+    
+    private var appleSession: TranslationSession?
     
     // Use UserDefaults directly (not @AppStorage — this isn't a View)
     
@@ -35,7 +70,10 @@ class TranslationService: ObservableObject {
     
     var currentEngine: Engine {
         get { Engine(rawValue: UserDefaults.standard.string(forKey: Self.engineKey) ?? "") ?? .google }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: Self.engineKey) }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: Self.engineKey)
+            objectWillChange.send()  // 通知 @ObservedObject 刷新 UI
+        }
     }
     
     var baiduAppId: String {
@@ -75,33 +113,101 @@ class TranslationService: ObservableObject {
             return TranslateResult(text: "", error: nil)
         }
         
-        switch currentEngine {
+        let isChinese = L10n.shared.language == .chinese
+        let selected = currentEngine
+        
+        // Build fallback chain: selected engine first, then Google → Baidu → Apple (excluding selected)
+        let fallbackOrder: [Engine] = [.google, .baidu, .apple].filter { $0 != selected }
+        let chain: [Engine] = [selected] + fallbackOrder
+        
+        var errors: [(engine: Engine, message: String)] = []
+        
+        for engine in chain {
+            // Skip Baidu if not configured
+            if engine == .baidu && !isBaiduConfigured {
+                let msg = isChinese ? "百度在线未配置（需填入 App ID 和密钥）" : "Baidu not configured (App ID & Secret Key required)"
+                errors.append((engine, msg))
+                continue
+            }
+            
+            let (resultText, errorMsg) = await callEngine(engine, text: text)
+            
+            if !resultText.isEmpty {
+                // Success — if we fell back, note it in error field AND update currentEngine
+                if engine != selected {
+                    currentEngine = engine  // 持久化切换，下次翻译也用这个引擎
+                    let usedName = engine.displayName(lang: L10n.shared.language)
+                    let selectedName = selected.displayName(lang: L10n.shared.language)
+                    let note = isChinese
+                        ? "[\(selectedName) 失败，已自动切换至 \(usedName)]"
+                        : "[\(selectedName) failed, switched to \(usedName)]"
+                    return TranslateResult(text: resultText, error: note)
+                }
+                return TranslateResult(text: resultText, error: nil)
+            }
+            
+            // Record failure
+            let engineName = engine.displayName(lang: L10n.shared.language)
+            let msg = errorMsg ?? (isChinese ? "未知错误" : "Unknown error")
+            errors.append((engine, "\(engineName): \(msg)"))
+        }
+        
+        // All engines failed
+        let details = errors.map { $0.message }.joined(separator: "\n")
+        let header = isChinese ? "所有翻译引擎均失败：\n" : "All engines failed:\n"
+        return TranslateResult(text: "", error: header + details)
+    }
+    
+    /// Call a single engine, returns (translatedText, errorMessage)
+    private func callEngine(_ engine: Engine, text: String) async -> (String, String?) {
+        switch engine {
+        case .apple:
+            let result = await translateWithApple(text)
+            if result.isEmpty {
+                let msg = L10n.shared.language == .chinese
+                    ? "Apple 翻译无响应（可能需要网络或系统语言包）"
+                    : "Apple Translate returned no result (may need network or language pack)"
+                return ("", msg)
+            }
+            return (result, nil)
         case .google:
             let result = await translateWithGoogle(text)
             if result.isEmpty {
-                return TranslateResult(text: "", error: "Google 翻译失败")
+                let msg = L10n.shared.language == .chinese
+                    ? "网络请求失败或响应解析错误"
+                    : "Network request failed or response parse error"
+                return ("", msg)
             }
-            return TranslateResult(text: result, error: nil)
+            return (result, nil)
         case .baidu:
-            if isBaiduConfigured {
-                let baiduResult = await translateWithBaidu(text)
-                if let error = baiduResult.error {
-                    // Baidu failed — show error + fallback to Google
-                    let googleResult = await translateWithGoogle(text)
-                    if googleResult.isEmpty {
-                        return TranslateResult(text: "", error: "百度翻译: \(error)\nGoogle 翻译也失败了")
-                    }
-                    return TranslateResult(text: googleResult, error: "百度翻译: \(error)（已自动切换 Google）")
-                }
-                return baiduResult
+            let baiduResult = await translateWithBaidu(text)
+            if let err = baiduResult.error {
+                return ("", err)
             }
-            // Baidu not configured, use Google
-            let result = await translateWithGoogle(text)
-            if result.isEmpty {
-                return TranslateResult(text: "", error: "百度翻译未配置，Google 翻译也失败了")
-            }
-            return TranslateResult(text: result, error: nil)
+            return (baiduResult.text, nil)
         }
+    }
+    
+    // MARK: - Apple Translation (macOS 15+)
+    
+    /// Lazy-initialize session on first use (TranslationSession requires user-gesture to present)
+    private func translateWithApple(_ text: String) async -> String {
+        guard let session = appleSession else {
+            // Fallback chain in translateWithFeedback will handle this
+            return ""
+        }
+        do {
+            let response = try await session.translate(text)
+            return response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            print("[TranslationService] Apple translate error: \(error)")
+            return ""
+        }
+    }
+    
+    /// Called by .translationTask view modifier to set the session from SwiftUI
+    func setAppleSession(_ session: TranslationSession) {
+        self.appleSession = session
     }
     
     // MARK: - Google Translate
