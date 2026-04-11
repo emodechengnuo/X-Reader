@@ -280,8 +280,17 @@ struct SettingsView: View {
                     }
                     
                     if !appState.ttsService.isKokoroReady && appState.ttsService.isKokoroLoading {
-                        ProgressView(value: appState.ttsService.kokoroProgress)
-                            .tint(.accentColor)
+                        VStack(alignment: .leading, spacing: 4) {
+                            ProgressView(value: appState.ttsService.kokoroProgress)
+                                .tint(.accentColor)
+                            HStack {
+                                Spacer()
+                                Text(appState.ttsService.kokoroProgressPercentText)
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .monospacedDigit()
+                            }
+                        }
                     }
                     
                     if !appState.ttsService.isKokoroReady {

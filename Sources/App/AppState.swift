@@ -37,6 +37,7 @@ class AppState: ObservableObject {
     /// Shared reference for WindowCloseHandler to set isTerminating before quit
     nonisolated(unsafe) static weak var shared: AppState?
     private var annotationSaveWorkItem: DispatchWorkItem?
+    private var cancellables: Set<AnyCancellable> = []
     
     // MARK: - PDF State
     @Published var document: PDFDocument?
@@ -308,6 +309,12 @@ class AppState: ObservableObject {
         )
 
         updateAppearance()
+        ttsService.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
         // Start loading Kokoro TTS model in background
         Task {
             await ttsService.loadKokoroModel()

@@ -11,6 +11,14 @@ import AVFoundation
 import KokoroCoreML
 
 class TTSService: NSObject, ObservableObject {
+    private enum KokoroStatusState {
+        case notLoaded
+        case downloading(percent: Int)
+        case loading
+        case ready
+        case downloadFailed(message: String)
+        case loadFailed(message: String)
+    }
 
     // MARK: - Properties
 
@@ -48,10 +56,7 @@ class TTSService: NSObject, ObservableObject {
         ) {
             let nsText = (utteranceText as NSString)
             let currentChars = nsText.substring(with: speechRange)
-            var wordIndex = 0
-            if let idx = wordsList.firstIndex(where: { $0.lowercased().hasPrefix(currentChars.lowercased()) }) {
-                wordIndex = idx
-            }
+            _ = wordsList.firstIndex(where: { $0.lowercased().hasPrefix(currentChars.lowercased()) })
             onWord?(speechRange, utteranceText)
         }
     }
@@ -71,6 +76,10 @@ class TTSService: NSObject, ObservableObject {
     @Published var isKokoroLoading: Bool = false
     /// Timer to auto-release Kokoro model after idle
     private var kokoroReleaseTimer: Timer?
+    private var languageObserver: NSObjectProtocol?
+    private var kokoroStatusState: KokoroStatusState = .notLoaded {
+        didSet { updateKokoroStatusText() }
+    }
     /// How long to keep Kokoro in memory after last use (seconds)
     private let kokoroIdleTimeout: TimeInterval = 120
 
@@ -88,8 +97,9 @@ class TTSService: NSObject, ObservableObject {
     }
 
     /// Model loading status for UI
-    @Published var kokoroStatus: String = "未加载"
+    @Published var kokoroStatus: String = L10n.shared.string(.kokoroNotLoaded)
     @Published var kokoroProgress: Double = 0
+    var kokoroProgressPercentText: String { "\(Int(kokoroProgress * 100))%" }
 
     // MARK: - Voice options
 
@@ -210,9 +220,49 @@ class TTSService: NSObject, ObservableObject {
         }
         speechDelegate.onWord = { [weak self] _, text in
             guard let self = self else { return }
-            let nsText = text as NSString
+            _ = text
             // Notify progress with current word index
             self.speakingCallback?(true, self.currentWordIndex)
+        }
+        languageObserver = NotificationCenter.default.addObserver(
+            forName: .L10nLanguageChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateKokoroStatusText()
+        }
+        updateKokoroStatusText()
+    }
+
+    deinit {
+        if let languageObserver {
+            NotificationCenter.default.removeObserver(languageObserver)
+        }
+    }
+
+    private func updateKokoroStatusText() {
+        let text: String
+        switch kokoroStatusState {
+        case .notLoaded:
+            text = L10n.shared.string(.kokoroNotLoaded)
+        case .downloading(let percent):
+            text = "\(L10n.shared.string(.kokoroDownloading)) \(percent)%"
+        case .loading:
+            text = L10n.shared.string(.kokoroLoading)
+        case .ready:
+            text = L10n.shared.string(.kokoroReady)
+        case .downloadFailed(let message):
+            text = "\(L10n.shared.string(.kokoroDownloadFailed)): \(message)"
+        case .loadFailed(let message):
+            text = "\(L10n.shared.string(.kokoroLoadFailed)): \(message)"
+        }
+
+        if Thread.isMainThread {
+            kokoroStatus = text
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.kokoroStatus = text
+            }
         }
     }
 
@@ -228,9 +278,11 @@ class TTSService: NSObject, ObservableObject {
         }
         guard engineExists == nil, !alreadyLoading else { return }
 
-        await MainActor.run { self.isKokoroLoading = true }
-        await MainActor.run { self.kokoroStatus = L10n.shared.string(.kokoroDownloading) }
-        await MainActor.run { self.kokoroProgress = 0 }
+        await MainActor.run {
+            self.isKokoroLoading = true
+            self.kokoroStatusState = .downloading(percent: 0)
+            self.kokoroProgress = 0
+        }
 
         // Run blocking download + model init on a background thread via Task.detached
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -242,13 +294,14 @@ class TTSService: NSObject, ObservableObject {
                     do {
                         try KokoroEngine.download(to: modelDir) { progress in
                             Task { @MainActor in
-                                self?.kokoroProgress = progress * 0.8
-                                self?.kokoroStatus = L10n.shared.string(.kokoroDownloading) + " \(Int(progress * 100))%"
+                                let displayProgress = progress * 0.8
+                                self?.kokoroProgress = displayProgress
+                                self?.kokoroStatusState = .downloading(percent: Int(displayProgress * 100))
                             }
                         }
                     } catch {
                         Task { @MainActor in
-                            self?.kokoroStatus = "下载 Kokoro 语音引擎失败"
+                            self?.kokoroStatusState = .downloadFailed(message: error.localizedDescription)
                             self?.isKokoroLoading = false
                         }
                         print("[TTSService] Kokoro download failed: \(error)")
@@ -259,20 +312,20 @@ class TTSService: NSObject, ObservableObject {
 
                 // Load engine (CPU-intensive: CoreML model compilation — synchronous/blocking)
                 Task { @MainActor in
-                    self?.kokoroStatus = L10n.shared.string(.kokoroLoading)
+                    self?.kokoroStatusState = .loading
                 }
                 do {
                     let engine = try KokoroEngine(modelDirectory: modelDir)
                     Task { @MainActor in
                         self?.kokoroEngine = engine
-                        self?.kokoroStatus = "已就绪 ✓"
+                        self?.kokoroStatusState = .ready
                         self?.kokoroProgress = 1.0
                         self?.isKokoroLoading = false
                     }
                     print("[TTSService] Kokoro model loaded successfully")
                 } catch {
                     Task { @MainActor in
-                        self?.kokoroStatus = "加载失败: \(error.localizedDescription)"
+                        self?.kokoroStatusState = .loadFailed(message: error.localizedDescription)
                         self?.isKokoroLoading = false
                     }
                     print("[TTSService] Kokoro model load failed: \(error)")
@@ -292,7 +345,7 @@ class TTSService: NSObject, ObservableObject {
         kokoroEngine = nil
         kokoroReleaseTimer?.invalidate()
         kokoroReleaseTimer = nil
-        kokoroStatus = "未加载"
+        kokoroStatusState = .notLoaded
         kokoroProgress = 0
         isKokoroLoading = false
         print("[TTSService] Kokoro model unloaded to free memory")
