@@ -31,6 +31,34 @@ struct Bookmark: Identifiable, Codable, Equatable {
     }
 }
 
+struct OpenPDFTab: Identifiable, Equatable {
+    let id: UUID
+    let url: URL
+    var title: String
+    let document: PDFDocument
+    var currentPage: Int
+    var totalPages: Int
+    var outlineItems: [OutlineItem]
+    var bookmarks: [Bookmark]
+
+    static func == (lhs: OpenPDFTab, rhs: OpenPDFTab) -> Bool {
+        lhs.id == rhs.id
+    }
+}
+
+private struct PersistedOpenPDFTab: Codable {
+    let id: UUID
+    let url: String
+    let path: String?
+    let title: String
+    let currentPage: Int
+}
+
+private struct PersistedTabSession: Codable {
+    let tabs: [PersistedOpenPDFTab]
+    let activeTabID: UUID?
+}
+
 @MainActor
 class AppState: ObservableObject {
     
@@ -38,6 +66,7 @@ class AppState: ObservableObject {
     nonisolated(unsafe) static weak var shared: AppState?
     private var annotationSaveWorkItem: DispatchWorkItem?
     private var cancellables: Set<AnyCancellable> = []
+    private var isSwitchingTabs = false
     
     // MARK: - PDF State
     @Published var document: PDFDocument?
@@ -56,7 +85,8 @@ class AppState: ObservableObject {
     
     @Published var currentPage: Int = 0 {
         didSet {
-            guard !isRestoringPosition && !isRestoringLayout && !isTerminating else { return }
+            guard !isRestoringPosition && !isRestoringLayout && !isTerminating && !isSwitchingTabs else { return }
+            syncActiveTabStateFromRuntime()
             saveReadingPosition()
             // Also keep hidden bookmark up-to-date as real-time backup
             // This ensures position survives ANY type of app exit (force quit, crash, etc.)
@@ -70,6 +100,26 @@ class AppState: ObservableObject {
         }
     }
     @Published var pdfURL: URL?
+    @Published var openTabs: [OpenPDFTab] = [] {
+        didSet {
+            guard !isRestoringTabSession, !isPersistingTabSession else { return }
+            saveTabSession()
+        }
+    }
+    @Published var activeTabID: UUID? {
+        didSet {
+            guard !isRestoringTabSession, !isPersistingTabSession else { return }
+            saveTabSession()
+        }
+    }
+    private var documentCache: [String: PDFDocument] = [:]
+    private var isRestoringTabSession: Bool = false
+    private var isPersistingTabSession: Bool = false
+
+    private var activeTabIndex: Int? {
+        guard let activeTabID else { return nil }
+        return openTabs.firstIndex { $0.id == activeTabID }
+    }
     
     // MARK: - Table of Contents
     @Published var outlineItems: [OutlineItem] = []
@@ -216,6 +266,8 @@ class AppState: ObservableObject {
     // MARK: - Bookmarks
     @Published var bookmarks: [Bookmark] = [] {
         didSet {
+            guard !isSwitchingTabs else { return }
+            syncActiveTabStateFromRuntime()
             saveBookmarks()
         }
     }
@@ -237,6 +289,7 @@ class AppState: ObservableObject {
     private let bookmarksKey = "xreader_bookmarks"
     private let readingPositionPrefix = "xreader_last_page_"
     private let lastOpenedPDFKey = "xreader_last_opened_pdf"
+    private let tabsSessionKey = "xreader_tabs_session_v1"
     private let sidebarVisibleKey = "xreader_sidebar_visible"
     private let analysisPanelVisibleKey = "xreader_analysis_panel_visible"
 
@@ -268,19 +321,21 @@ class AppState: ObservableObject {
             updateAppearance()
         }
 
-        // === Restore last opened PDF with hidden bookmark ===
-        if let urlString = UserDefaults.standard.string(forKey: lastOpenedPDFKey),
-           let url = URL(string: urlString),
-           FileManager.default.fileExists(atPath: url.path) {
+        // === Restore tab session first (multi-tab) ===
+        if !restoreTabSession() {
+            // Fallback: restore legacy single last-opened PDF
+            if let urlString = UserDefaults.standard.string(forKey: lastOpenedPDFKey),
+               let url = URL(string: urlString),
+               FileManager.default.fileExists(atPath: url.path) {
 
-            // Consume hidden bookmark (read & delete in one shot)
-            let savedPage = readHiddenBookmark()
-            let targetPage = savedPage ?? 0  // fallback to page 0
+                let savedPage = readHiddenBookmark()
+                let targetPage = savedPage ?? 0
 
-            print("[X-Reader] Launching PDF — hidden bookmark page: \(targetPage)")
+                print("[X-Reader] Launching PDF — hidden bookmark page: \(targetPage)")
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.loadPDF(from: url, targetPage: targetPage)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.loadPDF(from: url, targetPage: targetPage)
+                }
             }
         }
 
@@ -325,6 +380,11 @@ class AppState: ObservableObject {
         addBookmark()
     }
 
+    func persistSessionNow() {
+        saveHiddenBookmark()
+        saveTabSession()
+    }
+
     @objc private func handleContextHighlight(_ notification: Notification) {
         if let color = notification.object as? NSColor {
             let eventPoint = (notification.userInfo?["eventPoint"] as? NSValue)?.pointValue
@@ -353,29 +413,30 @@ class AppState: ObservableObject {
 
         if let selection = selection {
             let selectionsByLine = selection.selectionsByLine()
-            for lineSelection in selectionsByLine {
-                guard let page = lineSelection.pages.first else { continue }
+            let directMatches = selectionsByLine.flatMap { lineSelection -> [PDFAnnotation] in
+                guard let page = lineSelection.pages.first else { return [] }
                 let bounds = lineSelection.bounds(for: page)
-                if bounds.isEmpty { continue }
-
-                let annotationsToRemove = page.annotations.filter { annotation in
+                guard !bounds.isEmpty else { return [] }
+                return page.annotations.filter { annotation in
                     annotation.type == "Highlight" && annotation.bounds.intersects(bounds)
                 }
-                for annotation in annotationsToRemove {
-                    page.removeAnnotation(annotation)
-                }
             }
-            saveAnnotations()
+            let annotationsToRemove = expandedHighlightCluster(for: directMatches)
+            for annotation in annotationsToRemove {
+                annotation.page?.removeAnnotation(annotation)
+            }
+            if !annotationsToRemove.isEmpty { saveAnnotations() }
             return
         }
 
         if let point = eventPoint, let page = pdfView.page(for: point, nearest: true) {
             let pagePoint = pdfView.convert(point, to: page)
-            let annotationsToRemove = page.annotations.filter { annotation in
+            let hitAnnotations = page.annotations.filter { annotation in
                 annotation.type == "Highlight" && annotation.bounds.contains(pagePoint)
             }
+            let annotationsToRemove = expandedHighlightCluster(for: hitAnnotations)
             for annotation in annotationsToRemove {
-                page.removeAnnotation(annotation)
+                annotation.page?.removeAnnotation(annotation)
             }
             if !annotationsToRemove.isEmpty {
                 saveAnnotations()
@@ -401,11 +462,9 @@ class AppState: ObservableObject {
             return
         }
 
-        let alert = NSAlert()
-        alert.messageText = L10n.t(.noTextSelectedTitle)
-        alert.informativeText = L10n.t(.noTextSelectedMessage)
-        alert.alertStyle = .warning
-        alert.runModal()
+        // Avoid blocking modal alerts from context-menu actions.
+        // A modal shown while menu tracking can appear as app freeze.
+        NSSound.beep()
     }
 
     private func addHighlight(color: NSColor, selection: PDFSelection, in pdfView: PDFView) {
@@ -472,9 +531,11 @@ class AppState: ObservableObject {
         guard let point = eventPoint,
               let page = pdfView.page(for: point, nearest: true) else { return [] }
         let pagePoint = pdfView.convert(point, to: page)
-        return page.annotations.filter { annotation in
+        let hitAnnotations = page.annotations.filter { annotation in
             annotation.type == "Highlight" && annotation.bounds.contains(pagePoint)
         }
+        guard let seed = hitAnnotations.first else { return [] }
+        return highlightCluster(seed: seed, on: page)
     }
 
     private func deduplicatedAnnotations(_ annotations: [PDFAnnotation]) -> [PDFAnnotation] {
@@ -483,6 +544,71 @@ class AppState: ObservableObject {
             let identifier = ObjectIdentifier(annotation)
             return seen.insert(identifier).inserted
         }
+    }
+
+    private func expandedHighlightCluster(for seedAnnotations: [PDFAnnotation]) -> [PDFAnnotation] {
+        guard !seedAnnotations.isEmpty else { return [] }
+        var merged: [PDFAnnotation] = []
+        for seed in deduplicatedAnnotations(seedAnnotations) {
+            guard let page = seed.page else { continue }
+            merged.append(contentsOf: highlightCluster(seed: seed, on: page))
+        }
+        return deduplicatedAnnotations(merged)
+    }
+
+    private func highlightCluster(seed: PDFAnnotation, on page: PDFPage) -> [PDFAnnotation] {
+        let allHighlights = page.annotations.filter { $0.type == "Highlight" }
+        guard !allHighlights.isEmpty else { return [seed] }
+
+        var queue: [PDFAnnotation] = [seed]
+        var visited: Set<ObjectIdentifier> = [ObjectIdentifier(seed)]
+        var cluster: [PDFAnnotation] = [seed]
+
+        while !queue.isEmpty {
+            let current = queue.removeFirst()
+            for candidate in allHighlights {
+                let candidateID = ObjectIdentifier(candidate)
+                if visited.contains(candidateID) { continue }
+                if areLikelySameHighlightBlock(current, candidate) {
+                    visited.insert(candidateID)
+                    queue.append(candidate)
+                    cluster.append(candidate)
+                }
+            }
+        }
+
+        return cluster
+    }
+
+    private func areLikelySameHighlightBlock(_ a: PDFAnnotation, _ b: PDFAnnotation) -> Bool {
+        // Keep cluster conservative: only connect highlights with similar color.
+        let aColor = a.color.withAlphaComponent(1.0)
+        let bColor = b.color.withAlphaComponent(1.0)
+        guard aColor.isSimilar(to: bColor, tolerance: 0.16) else { return false }
+
+        let aBounds = a.bounds
+        let bBounds = b.bounds
+
+        // Directly touching/overlapping lines should definitely be connected.
+        if aBounds.insetBy(dx: -4, dy: -3).intersects(bBounds.insetBy(dx: -4, dy: -3)) {
+            return true
+        }
+
+        // Also connect nearby lines with horizontal overlap / same text column.
+        // Reopened PDFs may slightly change bounds, so use adaptive thresholds.
+        let yGap: CGFloat = max(0, max(aBounds.minY, bBounds.minY) - min(aBounds.maxY, bBounds.maxY))
+        let lineHeight = max(8, min(aBounds.height, bBounds.height))
+        let maxYGap = max(12, lineHeight * 1.4)
+
+        let xOverlap: CGFloat = max(0, min(aBounds.maxX, bBounds.maxX) - max(aBounds.minX, bBounds.minX))
+        let minWidth = max(1, min(aBounds.width, bBounds.width))
+        let overlapRatio = xOverlap / minWidth
+
+        let closeLeftEdge = abs(aBounds.minX - bBounds.minX) <= max(24, lineHeight * 2.2)
+        let closeMidX = abs(aBounds.midX - bBounds.midX) <= max(42, lineHeight * 3.0)
+        let sameColumn = closeLeftEdge || closeMidX
+
+        return yGap <= maxYGap && (overlapRatio >= 0.08 || sameColumn)
     }
 
     private func activePDFView() -> PDFView? {
@@ -536,6 +662,112 @@ class AppState: ObservableObject {
         case .system: setThemeMode(.dark)
         }
     }
+
+    private func syncActiveTabStateFromRuntime() {
+        guard let index = activeTabIndex else { return }
+        guard let currentDocument = document else { return }
+        let activeTab = openTabs[index]
+        guard activeTab.document === currentDocument else { return }
+        guard totalPages > 0 else { return }
+        openTabs[index].currentPage = currentPage
+        openTabs[index].totalPages = totalPages
+        openTabs[index].outlineItems = outlineItems
+        openTabs[index].bookmarks = bookmarks
+    }
+
+    private func resetReaderTransientState() {
+        selectedText = ""
+        translatedText = ""
+        wordAnalysis = nil
+        searchQuery = ""
+        isSearchActive = false
+        currentSearchMatchIndex = 0
+        searchResultCount = 0
+    }
+
+    private func activateTab(_ tabID: UUID, targetPage: Int? = nil, unlockDelay: TimeInterval = 0.7) {
+        guard let index = openTabs.firstIndex(where: { $0.id == tabID }) else { return }
+
+        syncActiveTabStateFromRuntime()
+
+        let tab = openTabs[index]
+        let safePage = max(0, min(targetPage ?? tab.currentPage, max(0, tab.totalPages - 1)))
+        let switchingWithinSameDocument = (document === tab.document)
+
+        if switchingWithinSameDocument {
+            activeTabID = tab.id
+            pdfURL = tab.url
+            bookTitle = tab.title
+            totalPages = tab.totalPages
+            outlineItems = tab.outlineItems
+            bookmarks = tab.bookmarks
+            currentPage = safePage
+            UserDefaults.standard.set(tab.url.absoluteString, forKey: lastOpenedPDFKey)
+            resetReaderTransientState()
+
+            if let page = tab.document.page(at: safePage) {
+                NotificationCenter.default.post(name: .xreaderGoToPage, object: page)
+            }
+            saveHiddenBookmark()
+            return
+        }
+
+        pendingTargetPage = safePage
+        isRestoringPosition = true
+        isRestoringLayout = true
+        isSwitchingTabs = true
+
+        activeTabID = tab.id
+        document = tab.document
+        pdfURL = tab.url
+        bookTitle = tab.title
+        totalPages = tab.totalPages
+        outlineItems = tab.outlineItems
+        bookmarks = tab.bookmarks
+        currentPage = safePage
+        UserDefaults.standard.set(tab.url.absoluteString, forKey: lastOpenedPDFKey)
+        resetReaderTransientState()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + unlockDelay) { [weak self] in
+            self?.isRestoringPosition = false
+            self?.isSwitchingTabs = false
+            self?.saveHiddenBookmark()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + unlockDelay + 0.25) { [weak self] in
+            self?.isRestoringLayout = false
+            self?.pendingTargetPage = nil
+        }
+    }
+
+    func switchToTab(_ tabID: UUID) {
+        activateTab(tabID)
+    }
+
+    func closeTab(_ tabID: UUID) {
+        syncActiveTabStateFromRuntime()
+        guard let index = openTabs.firstIndex(where: { $0.id == tabID }) else { return }
+        let closingActive = activeTabID == tabID
+        openTabs.remove(at: index)
+
+        if openTabs.isEmpty {
+            activeTabID = nil
+            document = nil
+            pdfURL = nil
+            bookTitle = "X-Reader"
+            totalPages = 0
+            currentPage = 0
+            pendingTargetPage = nil
+            outlineItems = []
+            bookmarks = []
+            resetReaderTransientState()
+            return
+        }
+
+        if closingActive {
+            let fallbackIndex = min(index, openTabs.count - 1)
+            activateTab(openTabs[fallbackIndex].id, unlockDelay: 0.45)
+        }
+    }
     
     // MARK: - Open PDF
     func openPDF() {
@@ -546,69 +778,86 @@ class AppState: ObservableObject {
         panel.message = L10n.t(.selectPdfFile)
         
         if panel.runModal() == .OK, let url = panel.url {
-            loadPDF(from: url)
+            loadPDFReplacingActiveTab(from: url)
         }
+    }
+
+    func duplicateCurrentTab() {
+        guard let currentURL = pdfURL else {
+            openPDF()
+            return
+        }
+
+        syncActiveTabStateFromRuntime()
+        guard let currentIndex = activeTabIndex else {
+            loadPDF(from: currentURL, targetPage: currentPage)
+            return
+        }
+
+        let currentTab = openTabs[currentIndex]
+        let duplicate = OpenPDFTab(
+            id: UUID(),
+            url: currentTab.url,
+            title: currentTab.title,
+            document: currentTab.document,
+            currentPage: currentPage,
+            totalPages: currentTab.totalPages,
+            outlineItems: currentTab.outlineItems,
+            bookmarks: currentTab.bookmarks
+        )
+        openTabs.append(duplicate)
+        activateTab(duplicate.id, targetPage: currentPage, unlockDelay: 0.25)
+    }
+
+    func loadPDFReplacingActiveTab(from url: URL, targetPage: Int = 0) {
+        if pdfURL != nil {
+            saveHiddenBookmark()
+            syncActiveTabStateFromRuntime()
+        }
+
+        guard let doc = cachedDocument(for: url) else { return }
+        let safePage = max(0, min(targetPage, max(0, doc.pageCount - 1)))
+        let replacementID = activeTabID ?? UUID()
+        let tab = OpenPDFTab(
+            id: replacementID,
+            url: url,
+            title: displayTitle(for: doc, fallbackURL: url),
+            document: doc,
+            currentPage: safePage,
+            totalPages: doc.pageCount,
+            outlineItems: outlineService.extractOutline(from: doc),
+            bookmarks: bookmarksForURL(url)
+        )
+
+        if let index = openTabs.firstIndex(where: { $0.id == replacementID }) {
+            openTabs[index] = tab
+        } else {
+            openTabs.append(tab)
+        }
+
+        activateTab(tab.id, targetPage: safePage, unlockDelay: 0.7)
     }
     
     func loadPDF(from url: URL, targetPage: Int = 0) {
-        // Save current position as hidden bookmark BEFORE switching
         if pdfURL != nil {
             saveHiddenBookmark()
+            syncActiveTabStateFromRuntime()
         }
 
-        if let doc = PDFDocument(url: url) {
-            // Clamp target page to valid range first
-            let safePage = max(0, min(targetPage, doc.pageCount - 1))
-
-            print("[X-Reader] Loading PDF — pages:\(doc.pageCount), target page:\(safePage)")
-
-            // === SET PENDING TARGET PAGE FIRST (before setting document!) ===
-            // This tells the PDFView (once created) to jump to this page.
-            // We set it BEFORE document so SwiftUI's re-render picks it up together.
-            pendingTargetPage = safePage
-
-            // Lock restoration — prevent PDFView's auto page-0 from overwriting us
-            isRestoringPosition = true
-            isRestoringLayout = true
-
-            // NOW set the document (triggers SwiftUI to create/update PDFView)
-            self.document = doc
-            self.pdfURL = url
-            self.bookTitle = url.deletingPathExtension().lastPathComponent
-            self.totalPages = doc.pageCount
-
-            // Extract outline
-            self.outlineItems = outlineService.extractOutline(from: doc)
-
-            // Load bookmarks
-            loadBookmarks(for: url)
-
-            // Save as last opened PDF
-            UserDefaults.standard.set(url.absoluteString, forKey: lastOpenedPDFKey)
-
-            // Reset state
-            self.selectedText = ""
-            self.translatedText = ""
-            self.wordAnalysis = nil
-            self.searchQuery = ""
-            self.isSearchActive = false
-            self.currentSearchMatchIndex = 0
-
-            // Set currentPage for UI consistency
-            self.currentPage = safePage
-
-            // Gradual release of restoration locks
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                self?.isRestoringPosition = false
-                // Re-save hidden bookmark now that locks are released
-                // (was suppressed during restoration, but the page is correct)
-                self?.saveHiddenBookmark()
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-                self?.isRestoringLayout = false
-                self?.pendingTargetPage = nil  // Clear after use
-            }
-        }
+        guard let doc = cachedDocument(for: url) else { return }
+        let safePage = max(0, min(targetPage, max(0, doc.pageCount - 1)))
+        let tab = OpenPDFTab(
+            id: UUID(),
+            url: url,
+            title: displayTitle(for: doc, fallbackURL: url),
+            document: doc,
+            currentPage: safePage,
+            totalPages: doc.pageCount,
+            outlineItems: outlineService.extractOutline(from: doc),
+            bookmarks: bookmarksForURL(url)
+        )
+        openTabs.append(tab)
+        activateTab(tab.id, targetPage: safePage, unlockDelay: 0.7)
     }
     
     // MARK: - Go to page
@@ -816,7 +1065,7 @@ class AppState: ObservableObject {
     // MARK: - Bookmarks
     
     func addBookmark() {
-        guard let doc = document, let url = pdfURL else { return }
+        guard let doc = document, pdfURL != nil else { return }
         let pageIndex = max(0, currentPage)
         guard pageIndex < doc.pageCount else { return }
         
@@ -902,13 +1151,115 @@ class AppState: ObservableObject {
     }
     
     private func loadBookmarks(for url: URL) {
+        bookmarks = bookmarksForURL(url)
+    }
+
+    private func bookmarksForURL(_ url: URL) -> [Bookmark] {
         let key = bookmarksKey + "_" + sanitizeForUserDefaults(url.absoluteString)
         if let data = UserDefaults.standard.data(forKey: key),
            let saved = try? JSONDecoder().decode([Bookmark].self, from: data) {
-            bookmarks = saved
-        } else {
-            bookmarks = []
+            return saved
         }
+        return []
+    }
+
+    private func displayTitle(for document: PDFDocument, fallbackURL url: URL) -> String {
+        if let rawTitle = document.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String {
+            let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !title.isEmpty {
+                return title
+            }
+        }
+        return url.deletingPathExtension().lastPathComponent
+    }
+
+    private func cachedDocument(for url: URL) -> PDFDocument? {
+        let key = url.standardizedFileURL.path
+        if let cached = documentCache[key] {
+            return cached
+        }
+        guard let document = PDFDocument(url: url) else { return nil }
+        documentCache[key] = document
+        return document
+    }
+
+    private func saveTabSession() {
+        guard !isPersistingTabSession else { return }
+        isPersistingTabSession = true
+        defer { isPersistingTabSession = false }
+        syncActiveTabStateFromRuntime()
+        let persistedTabs = openTabs.map { tab in
+            PersistedOpenPDFTab(
+                id: tab.id,
+                url: tab.url.absoluteString,
+                path: tab.url.path,
+                title: tab.title,
+                currentPage: tab.currentPage
+            )
+        }
+        let session = PersistedTabSession(tabs: persistedTabs, activeTabID: activeTabID)
+        if let data = try? JSONEncoder().encode(session) {
+            UserDefaults.standard.set(data, forKey: tabsSessionKey)
+        }
+    }
+
+    private func restoreTabSession() -> Bool {
+        guard let data = UserDefaults.standard.data(forKey: tabsSessionKey),
+              let session = try? JSONDecoder().decode(PersistedTabSession.self, from: data),
+              !session.tabs.isEmpty else {
+            return false
+        }
+
+        var restoredTabs: [OpenPDFTab] = []
+        for item in session.tabs {
+            guard let url = persistedURL(for: item),
+                  FileManager.default.fileExists(atPath: url.path),
+                  let doc = cachedDocument(for: url) else { continue }
+
+            let safePage = max(0, min(item.currentPage, max(0, doc.pageCount - 1)))
+            let tab = OpenPDFTab(
+                id: item.id,
+                url: url,
+                title: item.title.isEmpty ? displayTitle(for: doc, fallbackURL: url) : item.title,
+                document: doc,
+                currentPage: safePage,
+                totalPages: doc.pageCount,
+                outlineItems: outlineService.extractOutline(from: doc),
+                bookmarks: bookmarksForURL(url)
+            )
+            restoredTabs.append(tab)
+        }
+
+        guard !restoredTabs.isEmpty else { return false }
+
+        isRestoringTabSession = true
+        openTabs = restoredTabs
+        let restoredActiveID = session.activeTabID.flatMap { id in
+            restoredTabs.contains(where: { $0.id == id }) ? id : nil
+        } ?? restoredTabs.first?.id
+        activeTabID = restoredActiveID
+        isRestoringTabSession = false
+
+        if let activeID = restoredActiveID,
+           let activeTab = restoredTabs.first(where: { $0.id == activeID }) {
+            activateTab(activeID, targetPage: activeTab.currentPage, unlockDelay: 0.35)
+            return true
+        }
+
+        return false
+    }
+
+    private func persistedURL(for item: PersistedOpenPDFTab) -> URL? {
+        if let path = item.path, !path.isEmpty {
+            return URL(fileURLWithPath: path)
+        }
+        if let url = URL(string: item.url), url.isFileURL {
+            return url
+        }
+        if !item.url.isEmpty {
+            return URL(fileURLWithPath: item.url)
+        }
+        return nil
     }
     
     /// Sanitize URL string for use as UserDefaults key

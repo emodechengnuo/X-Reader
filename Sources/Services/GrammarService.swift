@@ -63,7 +63,7 @@ class GrammarService {
             let word = String(text[tokenRange])
             let lemma = tagger.tag(at: tokenRange.lowerBound, unit: .word, scheme: .lemma).0?.rawValue ?? word
             let posName = posDisplayName(tag)
-            let difficulty = estimateDifficulty(word: word)
+            let difficulty = estimateDifficulty(word: word, lemma: lemma)
             
             details.append(WordDetail(
                 word: word,
@@ -105,30 +105,17 @@ class GrammarService {
         }
     }
     
-    private func estimateDifficulty(word: String) -> String {
-        let length = word.count
-        let freq = Set(["the", "be", "to", "of", "and", "a", "in", "that", "have", "i",
-                        "it", "for", "not", "on", "with", "he", "as", "you", "do", "at",
-                        "this", "but", "his", "by", "from", "they", "we", "say", "her", "she",
-                        "or", "an", "will", "my", "one", "all", "would", "there", "their",
-                        "what", "so", "up", "out", "if", "about", "who", "get", "which", "go",
-                        "me", "when", "make", "can", "like", "time", "no", "just", "him",
-                        "know", "take", "people", "into", "year", "your", "good", "some",
-                        "could", "them", "see", "other", "than", "then", "now", "look", "only",
-                        "come", "its", "over", "think", "also", "back", "after", "use", "two",
-                        "how", "our", "work", "first", "well", "way", "even", "new", "want",
-                        "because", "any", "these", "give", "day", "most", "us"])
-        
-        if freq.contains(word.lowercased()) {
-            return "A1 入门"
-        } else if length <= 5 {
-            return "A2 基础"
-        } else if length <= 8 {
-            return "B1 中级"
-        } else if length <= 12 {
-            return "B2 中高级"
-        } else {
-            return "C1/C2 高级"
+    private func estimateDifficulty(word: String, lemma: String) -> String {
+        // CEFR-J (A1-B2) + Octanove (C1/C2) wordlists:
+        // unknown words are treated as C2 by product decision.
+        let band = CEFRVocabularyService.shared.lookupBand(word: word, lemma: lemma) ?? .c2
+        switch band {
+        case .a1: return "A1 入门"
+        case .a2: return "A2 基础"
+        case .b1: return "B1 中级"
+        case .b2: return "B2 中高级"
+        case .c1: return "C1 高级"
+        case .c2: return "C2 精通"
         }
     }
 }

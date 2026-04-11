@@ -20,6 +20,12 @@ struct MainView: View {
                 .environmentObject(appState)
             
             Divider()
+
+            if !appState.openTabs.isEmpty {
+                PDFTabsBar()
+                    .environmentObject(appState)
+                Divider()
+            }
             
             // Main content
             if appState.document != nil {
@@ -122,6 +128,119 @@ struct MainView: View {
             }
 
             return event
+        }
+    }
+}
+
+// MARK: - In-Window PDF Tabs
+
+struct PDFTabsBar: View {
+    @EnvironmentObject var appState: AppState
+    @ObservedObject private var l10n = L10n.shared
+
+    var body: some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 6) {
+                ForEach(appState.openTabs) { tab in
+                    PDFTabChip(tab: tab)
+                        .environmentObject(appState)
+                }
+            }
+            .frame(maxWidth: .infinity)
+
+            Button(action: { appState.duplicateCurrentTab() }) {
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(.primary.opacity(0.85))
+                    .frame(width: 30, height: 30)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(0.14), lineWidth: 0.8)
+                    )
+            }
+            .buttonStyle(.plain)
+            .help(l10n.language == .chinese ? "添加 PDF 标签" : "Add PDF Tab")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+struct PDFTabChip: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.colorScheme) private var colorScheme
+    let tab: OpenPDFTab
+
+    private var isActive: Bool {
+        appState.activeTabID == tab.id
+    }
+
+    private var tabCornerRadius: CGFloat { 16 }
+
+    private var activeFillOpacity: Double {
+        colorScheme == .dark ? 0.035 : 0.10
+    }
+
+    private var inactiveFillOpacity: Double {
+        colorScheme == .dark ? 0.015 : 0.045
+    }
+
+    private var activeStrokeColor: Color {
+        colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.22)
+    }
+
+    private var inactiveStrokeColor: Color {
+        colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.10)
+    }
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: isActive ? "book" : "book.closed")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(isActive ? .primary.opacity(0.92) : .secondary)
+
+            Text(tab.title)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .foregroundColor(isActive ? .primary : .secondary.opacity(0.95))
+
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 11)
+        .padding(.trailing, 32)
+        .frame(height: 32)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous)
+                .fill((colorScheme == .dark ? Color.white : Color.black).opacity(isActive ? activeFillOpacity : inactiveFillOpacity))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous)
+                .stroke(isActive ? activeStrokeColor : inactiveStrokeColor, lineWidth: isActive ? 1.0 : 0.8)
+        )
+        .overlay(alignment: .trailing) {
+            Button(action: { appState.closeTab(tab.id) }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .frame(width: 18, height: 18)
+                    .background(
+                        Circle().fill(
+                            (colorScheme == .dark ? Color.white : Color.black)
+                                .opacity(isActive ? 0.12 : 0.07)
+                        )
+                    )
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 6)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: tabCornerRadius, style: .continuous))
+        .onTapGesture {
+            appState.switchToTab(tab.id)
         }
     }
 }

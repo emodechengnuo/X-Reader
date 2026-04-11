@@ -21,18 +21,6 @@ struct PDFViewerView: NSViewRepresentable {
         pdfView.maxScaleFactor = 5.0
         pdfView.document = appState.document
 
-        // === CRITICAL: Jump to pending target page AFTER document is loaded ===
-        if let targetPage = appState.pendingTargetPage,
-           let doc = appState.document {
-            let safeIndex = max(0, min(targetPage, doc.pageCount - 1))
-            if let targetPDFPage = doc.page(at: safeIndex) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak pdfView] in
-                    pdfView?.go(to: targetPDFPage)
-                    print("[X-Reader] PDFViewerView jumped to pending page:\(safeIndex)")
-                }
-            }
-        }
-
         // Text selection callback — analyze selected text
         pdfView.onTextSelected = { [weak appState] text, range in
             guard let appState = appState else { return }
@@ -59,42 +47,34 @@ struct PDFViewerView: NSViewRepresentable {
             pdfView?.go(to: page)
         }
 
-        // Observe page changes
-        NotificationCenter.default.addObserver(
-            context.coordinator,
-            selector: #selector(Coordinator.pdfViewPageChanged(_:)),
-            name: Notification.Name.PDFViewPageChanged,
-            object: pdfView
-        )
-
-        // Observe scale changes
-        NotificationCenter.default.addObserver(
-            context.coordinator,
-            selector: #selector(Coordinator.pdfViewScaleChanged(_:)),
-            name: Notification.Name.PDFViewScaleChanged,
-            object: pdfView
-        )
-
-        // Monitor selection changes via notification
-        NotificationCenter.default.addObserver(
-            context.coordinator,
-            selector: #selector(Coordinator.pdfViewSelectionChanged(_:)),
-            name: Notification.Name.PDFViewSelectionChanged,
-            object: pdfView
-        )
+        context.coordinator.attachPDFObservers(to: pdfView)
 
         return pdfView
     }
 
     func updateNSView(_ pdfView: XReaderPDFView, context: Context) {
-        pdfView.document = appState.document
+        let targetDocument = appState.document
 
-        // Handle pending target page when document changes
+        // Avoid resetting document on every state update: this causes visible flicker.
+        if pdfView.document !== targetDocument {
+            pdfView.document = targetDocument
+            context.coordinator.lastAppliedPendingTarget = nil
+            context.coordinator.lastAppliedPendingDocumentID = nil
+        }
+
+        // Apply pending target only once per (document, page) pair.
         if let targetPage = appState.pendingTargetPage,
-           let doc = appState.document {
+           let doc = targetDocument {
             let safeIndex = max(0, min(targetPage, doc.pageCount - 1))
-            if let targetPDFPage = doc.page(at: safeIndex) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak pdfView] in
+            let docID = ObjectIdentifier(doc)
+            let alreadyApplied =
+                context.coordinator.lastAppliedPendingDocumentID == docID &&
+                context.coordinator.lastAppliedPendingTarget == safeIndex
+
+            if !alreadyApplied, let targetPDFPage = doc.page(at: safeIndex) {
+                context.coordinator.lastAppliedPendingDocumentID = docID
+                context.coordinator.lastAppliedPendingTarget = safeIndex
+                DispatchQueue.main.async { [weak pdfView] in
                     pdfView?.go(to: targetPDFPage)
                 }
             }
@@ -111,14 +91,66 @@ struct PDFViewerView: NSViewRepresentable {
         Coordinator(appState: appState)
     }
 
+    static func dismantleNSView(_ pdfView: XReaderPDFView, coordinator: Coordinator) {
+        coordinator.detachPDFObservers(from: pdfView)
+        if let observer = coordinator.goToPageObserver {
+            NotificationCenter.default.removeObserver(observer)
+            coordinator.goToPageObserver = nil
+        }
+    }
+
     @MainActor class Coordinator: NSObject {
         let appState: AppState
         var goToPageObserver: NSObjectProtocol?
+        var lastAppliedPendingDocumentID: ObjectIdentifier?
+        var lastAppliedPendingTarget: Int?
+        private weak var observedPDFView: PDFView?
         private var selectionDebounceWork: DispatchWorkItem?
         private var lastForwardedText: String = ""
 
         init(appState: AppState) {
             self.appState = appState
+        }
+
+        deinit {
+            selectionDebounceWork?.cancel()
+            if let observer = goToPageObserver {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+
+        func attachPDFObservers(to pdfView: PDFView) {
+            detachPDFObservers(from: observedPDFView)
+            observedPDFView = pdfView
+
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(pdfViewPageChanged(_:)),
+                name: Notification.Name.PDFViewPageChanged,
+                object: pdfView
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(pdfViewScaleChanged(_:)),
+                name: Notification.Name.PDFViewScaleChanged,
+                object: pdfView
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(pdfViewSelectionChanged(_:)),
+                name: Notification.Name.PDFViewSelectionChanged,
+                object: pdfView
+            )
+        }
+
+        func detachPDFObservers(from pdfView: PDFView?) {
+            guard let pdfView else { return }
+            NotificationCenter.default.removeObserver(self, name: Notification.Name.PDFViewPageChanged, object: pdfView)
+            NotificationCenter.default.removeObserver(self, name: Notification.Name.PDFViewScaleChanged, object: pdfView)
+            NotificationCenter.default.removeObserver(self, name: Notification.Name.PDFViewSelectionChanged, object: pdfView)
+            if observedPDFView === pdfView {
+                observedPDFView = nil
+            }
         }
 
         @objc func pdfViewPageChanged(_ notification: Notification) {

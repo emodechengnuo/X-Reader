@@ -35,7 +35,7 @@ struct SearchFieldRepresentable: NSViewRepresentable {
         context.coordinator.searchField = searchField
         context.coordinator.shouldFocus = $shouldFocus
 
-        NotificationCenter.default.addObserver(context.coordinator, selector: #selector(Coordinator.focusSearch), name: NSNotification.Name("focusSearch"), object: nil)
+        context.coordinator.registerFocusObserver()
 
         return searchField
     }
@@ -55,6 +55,10 @@ struct SearchFieldRepresentable: NSViewRepresentable {
         Coordinator(text: $text, shouldFocus: $shouldFocus, onEnter: onEnter, onShiftEnter: onShiftEnter)
     }
 
+    static func dismantleNSView(_ searchField: NSSearchField, coordinator: Coordinator) {
+        coordinator.unregisterFocusObserver()
+    }
+
     class Coordinator: NSObject, NSSearchFieldDelegate, NSTextFieldDelegate {
         var text: Binding<String>
         var shouldFocus: Binding<Bool>
@@ -62,6 +66,7 @@ struct SearchFieldRepresentable: NSViewRepresentable {
         let onShiftEnter: () -> Void
         var searchField: NSSearchField?
         var onSearchFieldCreated: ((NSSearchField) -> Void)?
+        private var focusObserver: NSObjectProtocol?
 
         init(text: Binding<String>, shouldFocus: Binding<Bool>, onEnter: @escaping () -> Void, onShiftEnter: @escaping () -> Void) {
             self.text = text
@@ -74,6 +79,28 @@ struct SearchFieldRepresentable: NSViewRepresentable {
                 if let field = self?.searchField {
                     self?.onSearchFieldCreated?(field)
                 }
+            }
+        }
+
+        deinit {
+            unregisterFocusObserver()
+        }
+
+        func registerFocusObserver() {
+            guard focusObserver == nil else { return }
+            focusObserver = NotificationCenter.default.addObserver(
+                forName: NSNotification.Name("focusSearch"),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.focusSearch()
+            }
+        }
+
+        func unregisterFocusObserver() {
+            if let focusObserver {
+                NotificationCenter.default.removeObserver(focusObserver)
+                self.focusObserver = nil
             }
         }
 
@@ -113,137 +140,17 @@ struct ToolbarView: View {
     private func t(_ key: L10nKey) -> String { l10n.string(key) }
 
     var body: some View {
-        HStack(spacing: 12) {
-            // Left: Book info
-            HStack(spacing: 8) {
-                Image(systemName: "book.closed.fill")
-                    .foregroundColor(.accentColor)
-                Text(appState.bookTitle)
-                    .font(.headline)
-                    .lineLimit(1)
+        ZStack {
+            HStack {
+                toolbarMainControls
             }
+            .frame(maxWidth: .infinity, alignment: .center)
 
-            Spacer()
-
-            // Center: Controls
-            HStack(spacing: 6) {
-                Button(action: { appState.openPDF() }) {
-                    Image(systemName: "folder")
-                }.help(t(.openPdfHelp))
-
-                Divider().frame(height: 18)
-
-                // Search toggle
-                Button(action: {
-                    withAnimation(.easeInOut(duration: 0.15)) { showSearchField.toggle() }
-                    if !showSearchField { closeSearch() }
-                }) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(showSearchField ? .accentColor : .secondary)
-                }
-                .help(t(.searchHelp))
-                .disabled(appState.document == nil)
-
-                // Zoom out
-                Button(action: { appState.currentScale = max(0.25, appState.currentScale - 0.25) }) {
-                    Image(systemName: "minus.magnifyingglass")
-                }.help(t(.zoomOutHelp))
-
-                Text("\(Int(appState.currentScale * 100))%")
-                    .font(.caption).monospacedDigit().frame(width: 40)
-
-                // Zoom in
-                Button(action: { appState.currentScale = min(5.0, appState.currentScale + 0.25) }) {
-                    Image(systemName: "plus.magnifyingglass")
-                }.help(t(.zoomInHelp))
-
-                // Reset zoom
-                Button(action: { appState.currentScale = 1.0 }) {
-                    Image(systemName: "arrow.counterclockwise")
-                }.help(t(.resetZoomHelp))
-
-                Divider().frame(height: 18)
-
-                // Highlight colors
-                HStack(spacing: 8) {
-                    ForEach(AppState.highlightColors, id: \.id) { highlight in
-                        Button(action: { appState.addHighlight(color: highlight.nsColor) }) {
-                            Circle()
-                                .fill(highlight.color)
-                                .frame(width: 18, height: 18)
-                                .overlay(Circle().stroke(Color.primary.opacity(0.2), lineWidth: 0.5))
-                                .frame(width: 28, height: 28)
-                        }
-                        .buttonStyle(.borderless)
-                        .help(t(.highlightHelp))
-                        .disabled(appState.document == nil)
-                    }
-                }
-                .alignmentGuide(.firstTextBaseline) { _ in 0 }
-
-                Divider().frame(height: 18)
-
-                // Clear all highlights
-                Button(action: {
-                    let alert = NSAlert()
-                    alert.messageText = t(.clearAllHighlightsTitle)
-                    alert.informativeText = t(.clearAllHighlightsMessage)
-                    alert.alertStyle = .warning
-                    alert.addButton(withTitle: t(.clearButton))
-                    alert.addButton(withTitle: t(.cancelButton))
-                    
-                    if alert.runModal() == .alertFirstButtonReturn {
-                        appState.clearAllHighlights()
-                    }
-                }) {
-                    Image(systemName: "eraser")
-                        .foregroundColor(.red)
-                }
-                .help(t(.clearAllHighlightsHelp))
-                .disabled(appState.document == nil)
-
-                Divider().frame(height: 18)
-                Button(action: { appState.addBookmark() }) {
-                    Image(systemName: appState.isBookmarked(appState.currentPage) ? "bookmark.fill" : "bookmark")
-                        .foregroundColor(appState.isBookmarked(appState.currentPage) ? .accentColor : .secondary)
-                }.help(t(.bookmarkHelp)).disabled(appState.document == nil)
-
-                // OCR
-                Button(action: { Task { await appState.runOCR() } }) {
-                    if appState.isOCRRunning {
-                        ProgressView().scaleEffect(0.7).frame(width: 16, height: 16)
-                    } else {
-                        Image(systemName: "doc.text.viewfinder")
-                    }
-                }.help(t(.ocrHelp)).disabled(appState.document == nil)
+            HStack {
+                Spacer()
+                toolbarRightControls
             }
-            .buttonStyle(.borderless)
-
-            Spacer()
-
-            // Right: Toggle buttons
-            HStack(spacing: 6) {
-                Button(action: { withAnimation(.easeInOut(duration: 0.25)) { appState.showSidebar.toggle() } }) {
-                    Image(systemName: "sidebar.leading").symbolRenderingMode(.hierarchical)
-                        .foregroundColor(appState.showSidebar ? .accentColor : .secondary)
-                }.help(t(.toggleSidebarHelp))
-
-                Button(action: { withAnimation(.easeInOut(duration: 0.25)) { appState.showAnalysis.toggle() } }) {
-                    Image(systemName: "sidebar.trailing").symbolRenderingMode(.hierarchical)
-                        .foregroundColor(appState.showAnalysis ? .accentColor : .secondary)
-                }.help(t(.toggleAnalysisHelp))
-
-                Button(action: toggleFullscreen) {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right").symbolRenderingMode(.hierarchical)
-                }.help(t(.fullscreenHelp))
-
-                Divider().frame(height: 18)
-
-                Button(action: { appState.toggleTheme() }) {
-                    Image(systemName: appState.themeMode.icon)
-                }.help(t(.themeHelp) + " (\(appState.themeMode.label))")
-            }
-            .buttonStyle(.borderless)
+            .frame(maxWidth: .infinity)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -264,6 +171,128 @@ struct ToolbarView: View {
                 closeSearch()
             }
         }
+    }
+
+    @ViewBuilder
+    private var toolbarMainControls: some View {
+        HStack(spacing: 6) {
+            Button(action: { appState.openPDF() }) {
+                Image(systemName: "folder")
+            }.help(t(.openPdfHelp))
+
+            Divider().frame(height: 18)
+
+            // Search toggle
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.15)) { showSearchField.toggle() }
+                if !showSearchField { closeSearch() }
+            }) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(showSearchField ? .accentColor : .secondary)
+            }
+            .help(t(.searchHelp))
+            .disabled(appState.document == nil)
+
+            // Zoom out
+            Button(action: { appState.currentScale = max(0.25, appState.currentScale - 0.25) }) {
+                Image(systemName: "minus.magnifyingglass")
+            }.help(t(.zoomOutHelp))
+
+            Text("\(Int(appState.currentScale * 100))%")
+                .font(.caption).monospacedDigit().frame(width: 40)
+
+            // Zoom in
+            Button(action: { appState.currentScale = min(5.0, appState.currentScale + 0.25) }) {
+                Image(systemName: "plus.magnifyingglass")
+            }.help(t(.zoomInHelp))
+
+            // Reset zoom
+            Button(action: { appState.currentScale = 1.0 }) {
+                Image(systemName: "arrow.counterclockwise")
+            }.help(t(.resetZoomHelp))
+
+            Divider().frame(height: 18)
+
+            // Highlight colors
+            HStack(spacing: 8) {
+                ForEach(AppState.highlightColors, id: \.id) { highlight in
+                    Button(action: { appState.addHighlight(color: highlight.nsColor) }) {
+                        Circle()
+                            .fill(highlight.color)
+                            .frame(width: 18, height: 18)
+                            .overlay(Circle().stroke(Color.primary.opacity(0.2), lineWidth: 0.5))
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(t(.highlightHelp))
+                    .disabled(appState.document == nil)
+                }
+            }
+            .alignmentGuide(.firstTextBaseline) { _ in 0 }
+
+            Divider().frame(height: 18)
+
+            // Clear all highlights
+            Button(action: {
+                let alert = NSAlert()
+                alert.messageText = t(.clearAllHighlightsTitle)
+                alert.informativeText = t(.clearAllHighlightsMessage)
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: t(.clearButton))
+                alert.addButton(withTitle: t(.cancelButton))
+
+                if alert.runModal() == .alertFirstButtonReturn {
+                    appState.clearAllHighlights()
+                }
+            }) {
+                Image(systemName: "eraser")
+                    .foregroundColor(.red)
+            }
+            .help(t(.clearAllHighlightsHelp))
+            .disabled(appState.document == nil)
+
+            Divider().frame(height: 18)
+            Button(action: { appState.addBookmark() }) {
+                Image(systemName: appState.isBookmarked(appState.currentPage) ? "bookmark.fill" : "bookmark")
+                    .foregroundColor(appState.isBookmarked(appState.currentPage) ? .accentColor : .secondary)
+            }.help(t(.bookmarkHelp)).disabled(appState.document == nil)
+
+            // OCR
+            Button(action: { Task { await appState.runOCR() } }) {
+                if appState.isOCRRunning {
+                    ProgressView().scaleEffect(0.7).frame(width: 16, height: 16)
+                } else {
+                    Image(systemName: "doc.text.viewfinder")
+                }
+            }.help(t(.ocrHelp)).disabled(appState.document == nil)
+        }
+        .buttonStyle(.borderless)
+    }
+
+    @ViewBuilder
+    private var toolbarRightControls: some View {
+        HStack(spacing: 6) {
+            Button(action: { withAnimation(.easeInOut(duration: 0.25)) { appState.showSidebar.toggle() } }) {
+                Image(systemName: "sidebar.leading").symbolRenderingMode(.hierarchical)
+                    .foregroundColor(appState.showSidebar ? .accentColor : .secondary)
+            }.help(t(.toggleSidebarHelp))
+
+            Button(action: { withAnimation(.easeInOut(duration: 0.25)) { appState.showAnalysis.toggle() } }) {
+                Image(systemName: "sidebar.trailing").symbolRenderingMode(.hierarchical)
+                    .foregroundColor(appState.showAnalysis ? .accentColor : .secondary)
+            }.help(t(.toggleAnalysisHelp))
+
+            Button(action: toggleFullscreen) {
+                Image(systemName: "arrow.up.left.and.arrow.down.right").symbolRenderingMode(.hierarchical)
+            }.help(t(.fullscreenHelp))
+
+            Divider().frame(height: 18)
+
+            Button(action: { appState.toggleTheme() }) {
+                Image(systemName: appState.themeMode.icon)
+            }.help(t(.themeHelp) + " (\(appState.themeMode.label))")
+        }
+        .buttonStyle(.borderless)
     }
 
     // MARK: - Search Bar

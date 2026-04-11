@@ -25,6 +25,7 @@ private var lang: AppLanguage {
  .environmentObject(appState)
  .onAppear {
  configureWindow()
+ ReaderWindowManager.shared.attachCurrentKeyWindowIfNeeded(appState: appState)
  // 注册菜单刷新（只更新 AppKit 菜单，不触发 SwiftUI 重建）
  MenuRefresher.shared.register(appState: appState)
  }
@@ -36,8 +37,14 @@ private var lang: AppLanguage {
  CommandGroup(replacing: .pasteboard) { }
  // 删除 App 菜单中的“服务”
  CommandGroup(replacing: .systemServices) { }
- // 删除帮助组（含“反馈给 Apple”）
- CommandGroup(replacing: .help) { }
+ // 自定义帮助组
+ CommandGroup(replacing: .help) {
+ Button(lang == .chinese ? "X-Reader 项目主页" : "X-Reader Project Page") {
+ if let url = URL(string: "https://github.com/emodechengnuo/X-Reader") {
+ NSWorkspace.shared.open(url)
+ }
+ }
+ }
  // 清空窗口相关系统组，避免注入不需要的窗口/标签页命令
  CommandGroup(replacing: .windowSize) { }
  CommandGroup(replacing: .windowList) { }
@@ -58,8 +65,15 @@ private var lang: AppLanguage {
 
  // File menu - 替换"新建"项为"打开PDF"
  CommandGroup(replacing: .newItem) {
+ Button(lang == .chinese ? "新建窗口" : "New Window") {
+ ReaderWindowManager.shared.openNewWindow()
+ }
+ .keyboardShortcut("n", modifiers: .command)
+
+ Divider()
+
  Button(lang == .chinese ? "打开 PDF…" : "Open PDF...") {
- appState.openPDF()
+ (ReaderWindowManager.shared.activeAppState ?? appState).openPDF()
  }
  .keyboardShortcut("o", modifiers: .command)
  }
@@ -416,9 +430,24 @@ final class MenuRefresher {
  )
  }
 
- private func cleanMenus(in mainMenu: NSMenu) {
+private func cleanMenus(in mainMenu: NSMenu) {
+ removeTopLevelMenu(in: mainMenu, titles: ["Edit", "编辑"])
+
  if let appMenu = findSubmenu(in: mainMenu, titles: ["X-Reader"]) {
    removeMenuItems(in: appMenu, titles: ["服务", "Services"], selectorNames: ["orderFrontServicesMenu:"])
+ }
+
+ if let viewMenu = findSubmenu(in: mainMenu, titles: ["显示", "视图", "View"]) {
+   removeMenuItems(in: viewMenu, titles: [
+     "显示标签页栏",
+     "Show Tab Bar",
+     "显示所有标签页",
+     "Show All Tabs"
+   ], selectorNames: [
+     "toggleTabBar:",
+     "showAllTabs:"
+   ])
+   collapseAdjacentSeparators(in: viewMenu)
  }
 
  if let windowMenu = findSubmenu(in: mainMenu, titles: ["窗口", "Window"]) {
@@ -485,6 +514,15 @@ final class MenuRefresher {
  return nil
  }
 
+ private func removeTopLevelMenu(in mainMenu: NSMenu, titles: [String]) {
+   let removeIndices = mainMenu.items.enumerated().compactMap { idx, item in
+     titles.contains(item.title) ? idx : nil
+   }
+   for idx in removeIndices.reversed() {
+     mainMenu.removeItem(at: idx)
+   }
+ }
+
  private func removeMenuItems(
    in menu: NSMenu,
    titles: [String],
@@ -530,6 +568,71 @@ final class MenuRefresher {
  }
 }
 
+@MainActor
+final class ReaderWindowManager: NSObject, NSWindowDelegate {
+ static let shared = ReaderWindowManager()
+
+ private var windowStates: [ObjectIdentifier: AppState] = [:]
+ private var retainedWindows: [ObjectIdentifier: NSWindow] = [:]
+
+ private override init() {
+ super.init()
+ }
+
+ var activeAppState: AppState? {
+   if let keyWindow = NSApp.keyWindow {
+     return windowStates[ObjectIdentifier(keyWindow)]
+   }
+   if let mainWindow = NSApp.mainWindow {
+     return windowStates[ObjectIdentifier(mainWindow)]
+   }
+   return nil
+ }
+
+ func register(window: NSWindow, appState: AppState) {
+   let id = ObjectIdentifier(window)
+   windowStates[id] = appState
+   retainedWindows[id] = window
+   window.delegate = self
+ }
+
+ func attachCurrentKeyWindowIfNeeded(appState: AppState) {
+   if let window = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
+     register(window: window, appState: appState)
+     return
+   }
+
+   DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+     self?.attachCurrentKeyWindowIfNeeded(appState: appState)
+   }
+ }
+
+ func openNewWindow() {
+   let newState = AppState()
+   let rootView = MainView().environmentObject(newState)
+   let hosting = NSHostingController(rootView: rootView)
+
+   let window = NSWindow(contentViewController: hosting)
+   window.title = "X-Reader"
+   window.setContentSize(NSSize(width: 1200, height: 800))
+   window.minSize = NSSize(width: 800, height: 600)
+   window.titleVisibility = .hidden
+   window.titlebarAppearsTransparent = true
+   window.toolbar = nil
+   window.collectionBehavior = [.fullScreenPrimary]
+   window.makeKeyAndOrderFront(nil)
+
+   register(window: window, appState: newState)
+ }
+
+ func windowWillClose(_ notification: Notification) {
+   guard let window = notification.object as? NSWindow else { return }
+   let id = ObjectIdentifier(window)
+   windowStates.removeValue(forKey: id)
+   retainedWindows.removeValue(forKey: id)
+ }
+}
+
 /// Configure the main window after it appears
 private func configureWindow() {
  guard let window = NSApp.keyWindow
@@ -560,11 +663,12 @@ private class WindowCloseHandler: NSObject {
  @objc func handleClose() {
  if UserDefaults.standard.bool(forKey: "close_as_minimize") {
  // Minimize to Dock — save hidden bookmark before hiding
- AppState.shared?.saveHiddenBookmark()
+ ReaderWindowManager.shared.activeAppState?.persistSessionNow()
  NSApp.keyWindow?.miniaturize(nil)
  } else {
  // Quit app — set flag to prevent PDFView teardown from overwriting bookmark
- AppState.shared?.isTerminating = true
+ ReaderWindowManager.shared.activeAppState?.persistSessionNow()
+ ReaderWindowManager.shared.activeAppState?.isTerminating = true
 NSApp.terminate(nil)
    }
  }

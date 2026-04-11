@@ -17,6 +17,9 @@ let package = Package(
                 .product(name: "KokoroCoreML", package: "kokoro-coreml")
             ],
             path: "Sources",
+            resources: [
+                .process("Resources/CEFR")
+            ],
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ],

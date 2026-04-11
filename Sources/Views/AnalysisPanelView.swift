@@ -84,6 +84,9 @@ struct AnalysisPanelView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var l10n = L10n.shared
     @State private var selectedTab: AnalysisTab = .translation
+    @State private var wordsSearchQuery: String = ""
+    @State private var wordsMinimumLevel: CEFRLevel = .a1
+    @State private var translationMinimumLevel: CEFRLevel = .a1
     @AppStorage("speech_rate") private var speechRate: Double = 1.0
     // Apple Translation session — uses Locale.Language(languageCode:) which is stable
     @State private var appleTranslationConfig: TranslationSession.Configuration?
@@ -146,7 +149,7 @@ struct AnalysisPanelView: View {
             // Content
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if !appState.selectedText.isEmpty {
+                    if selectedTab != .words && !appState.selectedText.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(t(.selectedText))
                                 .font(.caption)
@@ -166,10 +169,15 @@ struct AnalysisPanelView: View {
                     
                     switch selectedTab {
                     case .translation:
-                        TranslationTabContent()
+                        TranslationTabContent(
+                            minimumWordLevel: $translationMinimumLevel
+                        )
                             .environmentObject(appState.translationService)
                     case .words:
-                        WordsTabContent()
+                        WordsTabContent(
+                            wordSearchQuery: $wordsSearchQuery,
+                            minimumWordLevel: $wordsMinimumLevel
+                        )
                     case .tts:
                         TTSTabContent(speechRate: $speechRate)
                     }
@@ -199,6 +207,7 @@ struct TranslationTabContent: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var translationService: TranslationService
     @ObservedObject private var l10n = L10n.shared
+    @Binding var minimumWordLevel: CEFRLevel
     
     private func t(_ key: L10nKey) -> String { l10n.string(key) }
     
@@ -207,6 +216,11 @@ struct TranslationTabContent: View {
     /// Short display name for engine picker button
     private func engineShortName(_ engine: TranslationService.Engine) -> String {
         engine.fullDisplayName(lang: l10n.language)
+    }
+
+    private var filteredWords: [WordDetail] {
+        guard let details = appState.wordAnalysis?.wordDetails else { return [] }
+        return filterWords(details, query: "", minimumLevel: minimumWordLevel)
     }
     
     var body: some View {
@@ -243,7 +257,7 @@ struct TranslationTabContent: View {
             } else if !appState.translatedText.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        Image(systemName: "character.book.closed")
+                        Image(systemName: "text.bubble")
                             .font(.caption)
                             .foregroundColor(.accentColor)
                         Text(t(.translatedResult))
@@ -291,6 +305,43 @@ struct TranslationTabContent: View {
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 100)
             }
+
+            if appState.wordAnalysis != nil {
+                Divider().padding(.vertical, 4)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Image(systemName: "a.square")
+                            .font(.caption)
+                            .foregroundColor(.accentColor)
+                        Text(l10n.language == .chinese ? "句子单词" : "Sentence Words")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                        Spacer()
+                        Text("\(filteredWords.count)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+
+                    WordFilterBar(
+                        searchText: .constant(""),
+                        minimumLevel: $minimumWordLevel,
+                        showSearchField: false
+                    )
+
+                    if filteredWords.isEmpty {
+                        Text(l10n.language == .chinese ? "当前筛选条件下暂无单词" : "No words match current filter")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 6)
+                    } else {
+                        ForEach(filteredWords) { word in
+                            WordCardView(word: word)
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -300,8 +351,15 @@ struct TranslationTabContent: View {
 struct WordsTabContent: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var l10n = L10n.shared
+    @Binding var wordSearchQuery: String
+    @Binding var minimumWordLevel: CEFRLevel
     
     private func t(_ key: L10nKey) -> String { l10n.string(key) }
+
+    private var filteredWords: [WordDetail] {
+        guard let details = appState.wordAnalysis?.wordDetails else { return [] }
+        return filterWords(details, query: wordSearchQuery, minimumLevel: minimumWordLevel)
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -313,19 +371,26 @@ struct WordsTabContent: View {
                     .font(.caption)
                     .fontWeight(.semibold)
                 Spacer()
-                Text("\(appState.wordAnalysis?.wordDetails.count ?? 0) \(t(.wordCount))")
+                Text("\(filteredWords.count) \(t(.wordCount))")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
+
+            WordFilterBar(
+                searchText: $wordSearchQuery,
+                minimumLevel: $minimumWordLevel,
+                showSearchField: true
+            )
             
-            if let analysis = appState.wordAnalysis {
-                ForEach(analysis.wordDetails.indices, id: \.self) { idx in
-                    let word = analysis.wordDetails[idx]
+            if appState.wordAnalysis != nil {
+                ForEach(filteredWords) { word in
                     WordCardView(
                         word: word,
                         onEditMeaning: { newMeaning in
-                            // Update the meaning in the analysis
-                            appState.wordAnalysis?.wordDetails[idx].meaning = newMeaning.isEmpty ? nil : newMeaning
+                            // Update the meaning in the analysis (find by stable id)
+                            if let idx = appState.wordAnalysis?.wordDetails.firstIndex(where: { $0.id == word.id }) {
+                                appState.wordAnalysis?.wordDetails[idx].meaning = newMeaning.isEmpty ? nil : newMeaning
+                            }
                             // Persist to cache
                             if !newMeaning.isEmpty {
                                 appState.wordTranslationCache.setTranslationForWord(newMeaning, for: word.word)
@@ -591,6 +656,95 @@ struct WordCardView: View {
         let trimmed = editedText.trimmingCharacters(in: .whitespacesAndNewlines)
         onEditMeaning?(trimmed)
         isEditing = false
+    }
+}
+
+// MARK: - Word Filtering
+
+enum CEFRLevel: String, CaseIterable, Identifiable {
+    case a1 = "A1"
+    case a2 = "A2"
+    case b1 = "B1"
+    case b2 = "B2"
+    case c1 = "C1"
+    case c2 = "C2"
+
+    var id: String { rawValue }
+
+    var rank: Int {
+        switch self {
+        case .a1: return 1
+        case .a2: return 2
+        case .b1: return 3
+        case .b2: return 4
+        case .c1: return 5
+        case .c2: return 6
+        }
+    }
+
+    func label(language: AppLanguage) -> String {
+        language == .chinese ? "\(rawValue)及以上" : "\(rawValue)+"
+    }
+}
+
+private func parseCEFRLevel(from difficulty: String) -> CEFRLevel {
+    let value = difficulty.uppercased()
+    if value.contains("C1/C2") { return .c2 }
+    if value.contains("C2") { return .c2 }
+    if value.contains("C1") { return .c1 }
+    if value.contains("B2") { return .b2 }
+    if value.contains("B1") { return .b1 }
+    if value.contains("A2") { return .a2 }
+    return .a1
+}
+
+private func filterWords(_ words: [WordDetail], query: String, minimumLevel: CEFRLevel) -> [WordDetail] {
+    let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    return words.filter { word in
+        let level = parseCEFRLevel(from: word.difficulty)
+        guard level.rank >= minimumLevel.rank else { return false }
+        if trimmed.isEmpty { return true }
+        let q = trimmed.lowercased()
+        return word.word.lowercased().contains(q)
+            || word.lemma.lowercased().contains(q)
+            || (word.meaning?.lowercased().contains(q) ?? false)
+    }
+}
+
+struct WordFilterBar: View {
+    @ObservedObject private var l10n = L10n.shared
+    @Binding var searchText: String
+    @Binding var minimumLevel: CEFRLevel
+    let showSearchField: Bool
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if showSearchField {
+                TextField(
+                    l10n.language == .chinese ? "搜索已查单词" : "Search looked-up words",
+                    text: $searchText
+                )
+                .textFieldStyle(.roundedBorder)
+            }
+
+            HStack(spacing: 8) {
+                Text(l10n.language == .chinese ? "筛选等级" : "Level")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+                Picker("", selection: $minimumLevel) {
+                    ForEach(CEFRLevel.allCases) { level in
+                        Text(level.label(language: l10n.language)).tag(level)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(maxWidth: 130)
+            }
+        }
+        .padding(8)
+        .background(Color(nsColor: .textBackgroundColor))
+        .cornerRadius(6)
     }
 }
 
