@@ -62,7 +62,6 @@ struct MainView: View {
                 .environmentObject(appState)
         }
         .frame(minWidth: 800, minHeight: 600)
-        .id(l10n.language)  // Re-render on language change
         .onAppear {
             setupKeyboardShortcuts()
         }

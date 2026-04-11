@@ -356,12 +356,14 @@ class TTSService: NSObject, ObservableObject {
                 let result = try engine.synthesize(text: text, voice: voiceName)
                 speakingCallback?(true, 0)
 
-                // Play audio samples with rate control
-                try playAudioSamples(result.samples, rate: currentPlaybackRate)
-
-                speakingCallback?(false, 0)
-                // Schedule model release after idle period
-                scheduleKokoroRelease()
+                // Play audio samples with rate control; mark finished only when playback really ends.
+                try playAudioSamples(result.samples, rate: currentPlaybackRate) { [weak self] in
+                    guard let self = self else { return }
+                    Task { @MainActor in
+                        self.speakingCallback?(false, 0)
+                        self.scheduleKokoroRelease()
+                    }
+                }
             } catch {
                 print("[TTSService] Kokoro synthesis failed: \(error)")
                 // Fall back to system voice
@@ -412,7 +414,7 @@ class TTSService: NSObject, ObservableObject {
     }
 
     /// Play audio samples through AVAudioEngine with rate control
-    private func playAudioSamples(_ samples: [Float], rate: Float) throws {
+    private func playAudioSamples(_ samples: [Float], rate: Float, onFinished: (() -> Void)? = nil) throws {
         // Stop any existing audio engine
         stopAudioEngine()
 
@@ -441,7 +443,9 @@ class TTSService: NSObject, ObservableObject {
         buffer.frameLength = AVAudioFrameCount(samples.count)
         memcpy(buffer.floatChannelData![0], samples, samples.count * MemoryLayout<Float>.size)
 
-        playerNode.scheduleBuffer(buffer)
+        playerNode.scheduleBuffer(buffer) {
+            onFinished?()
+        }
         playerNode.play()
 
         self.audioEngine = engine

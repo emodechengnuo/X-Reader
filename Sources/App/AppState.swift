@@ -36,6 +36,7 @@ class AppState: ObservableObject {
     
     /// Shared reference for WindowCloseHandler to set isTerminating before quit
     nonisolated(unsafe) static weak var shared: AppState?
+    private var annotationSaveWorkItem: DispatchWorkItem?
     
     // MARK: - PDF State
     @Published var document: PDFDocument?
@@ -152,38 +153,21 @@ class AppState: ObservableObject {
         HighlightColor(id: "pink", label: "Pink", color: .pink, nsColor: .systemPink),
         HighlightColor(id: "blue", label: "Blue", color: .blue, nsColor: .systemBlue),
     ]
+
+    static func highlightColorID(for color: NSColor?) -> String? {
+        guard let color else { return nil }
+        let source = color.withAlphaComponent(1.0)
+        return highlightColors.first { highlight in
+            source.isSimilar(to: highlight.nsColor)
+        }?.id
+    }
     
     func addHighlight(color: NSColor) {
-        guard let pdfView = NSApp.keyWindow?.contentView?.findPdfView() as? PDFView,
-              let selection = pdfView.currentSelection,
-              let selectedText = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !selectedText.isEmpty
+        guard let pdfView = activePDFView(),
+              let selection = effectiveSelection(in: pdfView)
         else { return }
-        let alphaColor = color.withAlphaComponent(0.35)
 
-        let selectionsByLine = selection.selectionsByLine()
-        var added = false
-        for lineSelection in selectionsByLine {
-            guard let page = lineSelection.pages.first else { continue }
-            let bounds = lineSelection.bounds(for: page)
-            if bounds.isEmpty { continue }
-            let annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
-            annotation.color = alphaColor
-            annotation.border = PDFBorder()
-            annotation.border?.lineWidth = 0
-            if let text = lineSelection.string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-                annotation.contents = text
-            }
-            page.addAnnotation(annotation)
-            added = true
-        }
-        if added {
-            pdfView.setCurrentSelection(selection, animate: false)
-            // Delay saving to avoid UI freeze
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.saveAnnotations()
-            }
-        }
+        addHighlight(color: color, selection: selection, in: pdfView)
     }
 
     private func saveAnnotations() {
@@ -209,7 +193,7 @@ class AppState: ObservableObject {
     }
 
     func clearHighlightAtSelection() {
-        guard let pdfView = NSApp.keyWindow?.contentView?.findPdfView() as? PDFView,
+        guard let pdfView = activePDFView(),
               let selection = pdfView.currentSelection else { return }
 
         let selectionsByLine = selection.selectionsByLine()
@@ -336,20 +320,8 @@ class AppState: ObservableObject {
 
     @objc private func handleContextHighlight(_ notification: Notification) {
         if let color = notification.object as? NSColor {
-            // Check if we have a current selection from the PDF view
-            if let pdfView = NSApp.keyWindow?.contentView?.findPdfView() as? PDFView,
-               let selection = pdfView.currentSelection,
-               let selectedText = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !selectedText.isEmpty {
-                addHighlight(color: color)
-            } else {
-                // Show alert if no text is selected
-                let alert = NSAlert()
-                alert.messageText = L10n.t(.noTextSelectedTitle)
-                alert.informativeText = L10n.t(.noTextSelectedMessage)
-                alert.alertStyle = .warning
-                alert.runModal()
-            }
+            let eventPoint = (notification.userInfo?["eventPoint"] as? NSValue)?.pointValue
+            applyHighlightColor(color: color, eventPoint: eventPoint)
         }
     }
 
@@ -362,7 +334,7 @@ class AppState: ObservableObject {
     }
 
     func clearHighlightAtSelection(eventPoint: NSPoint? = nil) {
-        guard let pdfView = NSApp.keyWindow?.contentView?.findPdfView() as? PDFView else { return }
+        guard let pdfView = activePDFView() else { return }
 
         var selection = pdfView.currentSelection
         if (selection == nil || selection?.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true), let point = eventPoint {
@@ -402,6 +374,132 @@ class AppState: ObservableObject {
                 saveAnnotations()
             }
         }
+    }
+
+    private func applyHighlightColor(color: NSColor, eventPoint: NSPoint?) {
+        guard let pdfView = activePDFView() else { return }
+
+        let annotationsToUpdate = highlightAnnotations(in: pdfView, eventPoint: eventPoint)
+        if !annotationsToUpdate.isEmpty {
+            let targetColor = color.withAlphaComponent(0.35)
+            for annotation in annotationsToUpdate {
+                annotation.color = targetColor
+            }
+            scheduleSaveAnnotations(delay: 0.25)
+            return
+        }
+
+        if let selection = effectiveSelection(in: pdfView, eventPoint: eventPoint) {
+            addHighlight(color: color, selection: selection, in: pdfView)
+            return
+        }
+
+        let alert = NSAlert()
+        alert.messageText = L10n.t(.noTextSelectedTitle)
+        alert.informativeText = L10n.t(.noTextSelectedMessage)
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+
+    private func addHighlight(color: NSColor, selection: PDFSelection, in pdfView: PDFView) {
+        guard let selectedText = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !selectedText.isEmpty else { return }
+
+        let alphaColor = color.withAlphaComponent(0.35)
+        let selectionsByLine = selection.selectionsByLine()
+        var added = false
+
+        for lineSelection in selectionsByLine {
+            guard let page = lineSelection.pages.first else { continue }
+            let bounds = lineSelection.bounds(for: page)
+            if bounds.isEmpty { continue }
+
+            let annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
+            annotation.color = alphaColor
+            annotation.border = PDFBorder()
+            annotation.border?.lineWidth = 0
+            if let text = lineSelection.string?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                annotation.contents = text
+            }
+            page.addAnnotation(annotation)
+            added = true
+        }
+
+        if added {
+            pdfView.setCurrentSelection(selection, animate: false)
+            scheduleSaveAnnotations(delay: 0.35)
+        }
+    }
+
+    private func effectiveSelection(in pdfView: PDFView, eventPoint: NSPoint? = nil) -> PDFSelection? {
+        if let selection = pdfView.currentSelection,
+           let selectedText = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !selectedText.isEmpty {
+            return selection
+        }
+
+        guard let point = eventPoint,
+              let page = pdfView.page(for: point, nearest: true) else { return nil }
+        let pagePoint = pdfView.convert(point, to: page)
+        guard let selection = page.selectionForWord(at: pagePoint),
+              let selectedText = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !selectedText.isEmpty else { return nil }
+        return selection
+    }
+
+    private func highlightAnnotations(in pdfView: PDFView, eventPoint: NSPoint? = nil) -> [PDFAnnotation] {
+        if let selection = effectiveSelection(in: pdfView) {
+            let matches = selection.selectionsByLine().flatMap { lineSelection -> [PDFAnnotation] in
+                guard let page = lineSelection.pages.first else { return [] }
+                let bounds = lineSelection.bounds(for: page)
+                guard !bounds.isEmpty else { return [] }
+                return page.annotations.filter { annotation in
+                    annotation.type == "Highlight" && annotation.bounds.intersects(bounds)
+                }
+            }
+            if !matches.isEmpty {
+                return deduplicatedAnnotations(matches)
+            }
+        }
+
+        guard let point = eventPoint,
+              let page = pdfView.page(for: point, nearest: true) else { return [] }
+        let pagePoint = pdfView.convert(point, to: page)
+        return page.annotations.filter { annotation in
+            annotation.type == "Highlight" && annotation.bounds.contains(pagePoint)
+        }
+    }
+
+    private func deduplicatedAnnotations(_ annotations: [PDFAnnotation]) -> [PDFAnnotation] {
+        var seen = Set<ObjectIdentifier>()
+        return annotations.filter { annotation in
+            let identifier = ObjectIdentifier(annotation)
+            return seen.insert(identifier).inserted
+        }
+    }
+
+    private func activePDFView() -> PDFView? {
+        if let view = NSApp.keyWindow?.contentView?.findPdfView() as? PDFView {
+            return view
+        }
+        if let view = NSApp.mainWindow?.contentView?.findPdfView() as? PDFView {
+            return view
+        }
+        for window in NSApp.orderedWindows {
+            if let view = window.contentView?.findPdfView() as? PDFView {
+                return view
+            }
+        }
+        return nil
+    }
+
+    private func scheduleSaveAnnotations(delay: TimeInterval) {
+        annotationSaveWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.saveAnnotations()
+        }
+        annotationSaveWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
     
     func updateAppearance() {
@@ -812,6 +910,17 @@ class AppState: ObservableObject {
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: ":", with: "_")
             .replacingOccurrences(of: ".", with: "_")
+    }
+}
+
+private extension NSColor {
+    func isSimilar(to other: NSColor, tolerance: CGFloat = 0.08) -> Bool {
+        guard let lhs = usingColorSpace(.deviceRGB),
+              let rhs = other.usingColorSpace(.deviceRGB) else { return false }
+
+        return abs(lhs.redComponent - rhs.redComponent) < tolerance
+            && abs(lhs.greenComponent - rhs.greenComponent) < tolerance
+            && abs(lhs.blueComponent - rhs.blueComponent) < tolerance
     }
 }
 

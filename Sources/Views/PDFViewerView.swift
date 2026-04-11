@@ -174,6 +174,16 @@ class XReaderPDFView: PDFView, NSGestureRecognizerDelegate {
     private var lastMenuEventPoint: NSPoint?
     var onTextSelected: ((String, NSRange) -> Void)?
     var onPinchZoom: ((CGFloat) -> Void)?
+    private static let menuAlignmentImage: NSImage = {
+        let size = NSSize(width: 14, height: 14)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSColor.clear.setFill()
+        NSBezierPath(rect: NSRect(origin: .zero, size: size)).fill()
+        image.unlockFocus()
+        return image
+    }()
+    private static let menuIconConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -200,35 +210,43 @@ class XReaderPDFView: PDFView, NSGestureRecognizerDelegate {
         let localPoint = convert(event.locationInWindow, from: nil)
         lastMenuEventPoint = localPoint
 
+        let hasSelectedText = currentSelection?.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+
         // Custom items
         var customItems: [NSMenuItem] = []
 
         let translateItem = NSMenuItem(title: isZh ? "翻译" : "Translate", action: #selector(contextTranslate), keyEquivalent: "")
         translateItem.target = self
+        setMenuIcon(translateItem, symbolName: "globe")
         customItems.append(translateItem)
 
         let speakItem = NSMenuItem(title: isZh ? "朗读" : "Speak", action: #selector(contextSpeak), keyEquivalent: "")
         speakItem.target = self
+        setMenuIcon(speakItem, symbolName: "speaker.wave.2")
         customItems.append(speakItem)
 
         customItems.append(NSMenuItem.separator())
 
         let zoomInItem = NSMenuItem(title: isZh ? "放大" : "Zoom In", action: #selector(contextZoomIn), keyEquivalent: "")
         zoomInItem.target = self
+        setMenuIcon(zoomInItem, symbolName: "plus.magnifyingglass")
         customItems.append(zoomInItem)
 
         let zoomOutItem = NSMenuItem(title: isZh ? "缩小" : "Zoom Out", action: #selector(contextZoomOut), keyEquivalent: "")
         zoomOutItem.target = self
+        setMenuIcon(zoomOutItem, symbolName: "minus.magnifyingglass")
         customItems.append(zoomOutItem)
 
         customItems.append(NSMenuItem.separator())
 
         let bookmarkItem = NSMenuItem(title: isZh ? "书签" : "Bookmark", action: #selector(contextBookmark), keyEquivalent: "")
         bookmarkItem.target = self
+        setMenuIcon(bookmarkItem, symbolName: "bookmark")
         customItems.append(bookmarkItem)
 
         let fullscreenItem = NSMenuItem(title: isZh ? "全屏" : "Fullscreen", action: #selector(contextFullscreen), keyEquivalent: "")
         fullscreenItem.target = self
+        setMenuIcon(fullscreenItem, symbolName: "arrow.up.left.and.arrow.down.right")
         customItems.append(fullscreenItem)
 
         // 检查是否有高亮，添加"清除高亮"菜单项
@@ -240,14 +258,23 @@ class XReaderPDFView: PDFView, NSGestureRecognizerDelegate {
         }
         if hasHighlight {
             customItems.append(NSMenuItem.separator())
+        }
+
+        if hasHighlight || hasSelectedText {
+            customItems.append(makeHighlightColorMenuItem())
+        }
+
+        if hasHighlight {
             let clearItem = NSMenuItem(title: isZh ? "清除高亮" : "Clear Highlight", action: #selector(contextClearHighlight), keyEquivalent: "")
             clearItem.target = self
+            setMenuIcon(clearItem, symbolName: "eraser")
             customItems.append(clearItem)
         }
 
         if let menu = systemMenu {
-            // 删除 "Remove Note" 菜单项
-            removeRemoveNoteItems(menu)
+            // 删除 PDFKit 自带的高亮编辑项，避免失灵的按钮和歪斜布局
+            removeConflictingAnnotationItems(menu)
+            applySystemMenuIcons(menu)
 
             // 在 Copy 后面插入自定义项
             let insertIdx = findInsertIndex(menu)
@@ -273,15 +300,50 @@ class XReaderPDFView: PDFView, NSGestureRecognizerDelegate {
         return 0
     }
 
-    private func removeRemoveNoteItems(_ menu: NSMenu) {
-        // 删除 "Remove Note" 和 "Remove Highlight" 相关菜单项（PDFKit 系统菜单自带但无效）
+    private func alignTextItem(_ item: NSMenuItem) {
+        item.image = Self.menuAlignmentImage
+    }
+
+    private func setMenuIcon(_ item: NSMenuItem, symbolName: String) {
+        let icon = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(Self.menuIconConfiguration)
+        item.image = icon ?? Self.menuAlignmentImage
+    }
+
+    private func applySystemMenuIcons(_ menu: NSMenu) {
+        for item in menu.items {
+            if item.isSeparatorItem { continue }
+
+            let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if title.isEmpty { continue }
+
+            if title.contains("单页连续") || title.contains("single page continuous") {
+                setMenuIcon(item, symbolName: "doc.on.doc")
+                continue
+            }
+
+            if title.contains("双页连续") || title.contains("two-up continuous") || title.contains("two pages continuous") {
+                setMenuIcon(item, symbolName: "square.split.2x1")
+                continue
+            }
+        }
+    }
+
+    private func removeConflictingAnnotationItems(_ menu: NSMenu) {
+        // 删除 PDFKit 自带但经常失灵的注释编辑项，保留其余系统菜单
         var indicesToRemove: [Int] = []
         for (idx, item) in menu.items.enumerated() {
             if item.isSeparatorItem { continue }
 
             let titleLower = item.title.lowercased()
-            if titleLower.contains("remove note") || titleLower.contains("移除备注") || titleLower.contains("删除备注")
-                || titleLower.contains("remove highlight") || titleLower.contains("删除高亮") || titleLower.contains("移除高亮") {
+            let title = titleLower.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if item.view != nil
+                || title.isEmpty
+                || title == "u"
+                || title == "s"
+                || title.contains("remove note") || title.contains("移除备注") || title.contains("删除备注")
+                || title.contains("remove highlight") || title.contains("删除高亮") || title.contains("移除高亮") {
                 indicesToRemove.append(idx)
             }
         }
@@ -289,6 +351,61 @@ class XReaderPDFView: PDFView, NSGestureRecognizerDelegate {
         for idx in indicesToRemove.reversed() {
             menu.removeItem(at: idx)
         }
+
+        collapseAdjacentSeparators(in: menu)
+    }
+
+    private func collapseAdjacentSeparators(in menu: NSMenu) {
+        var previousWasSeparator = true
+        for index in menu.items.indices.reversed() {
+            let item = menu.items[index]
+            if item.isSeparatorItem {
+                if previousWasSeparator || index == menu.items.count - 1 {
+                    menu.removeItem(at: index)
+                }
+                previousWasSeparator = true
+            } else {
+                previousWasSeparator = false
+            }
+        }
+    }
+
+    private func makeHighlightColorMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let rowView = HighlightColorMenuRowView(
+            colors: AppState.highlightColors,
+            activeColorID: activeHighlightColorID(),
+            onSelectColorID: { [weak self] colorID in
+                self?.contextApplyHighlightColor(colorID: colorID)
+            }
+        )
+        item.view = rowView
+        return item
+    }
+
+    private func activeHighlightColorID() -> String? {
+        guard let annotation = highlightAnnotationAtCurrentContext() else { return nil }
+        return AppState.highlightColorID(for: annotation.color)
+    }
+
+    private func highlightAnnotationAtCurrentContext() -> PDFAnnotation? {
+        if let selection = currentSelection {
+            let selectionsByLine = selection.selectionsByLine()
+            for lineSelection in selectionsByLine {
+                guard let page = lineSelection.pages.first else { continue }
+                let bounds = lineSelection.bounds(for: page)
+                guard !bounds.isEmpty else { continue }
+
+                if let annotation = page.annotations.first(where: { $0.type == "Highlight" && $0.bounds.intersects(bounds) }) {
+                    return annotation
+                }
+            }
+        }
+
+        guard let point = lastMenuEventPoint,
+              let page = page(for: point, nearest: true) else { return nil }
+        let pagePoint = convert(point, to: page)
+        return page.annotations.first(where: { $0.type == "Highlight" && $0.bounds.contains(pagePoint) })
     }
 
     private func hasHighlightAtSelection(_ selection: PDFSelection) -> Bool {
@@ -333,6 +450,16 @@ class XReaderPDFView: PDFView, NSGestureRecognizerDelegate {
         }
         NotificationCenter.default.post(name: NSNotification.Name("contextClearHighlight"), object: nil, userInfo: ["eventPoint": NSValue(point: point)])
     }
+    private func contextApplyHighlightColor(colorID: String) {
+        guard let point = lastMenuEventPoint,
+              let color = AppState.highlightColors.first(where: { $0.id == colorID })?.nsColor else { return }
+
+        NotificationCenter.default.post(
+            name: NSNotification.Name("contextHighlight"),
+            object: color,
+            userInfo: ["eventPoint": NSValue(point: point)]
+        )
+    }
     @objc private func contextZoomIn() { onPinchZoom?(scaleFactor*1.25) }
     @objc private func contextZoomOut() { onPinchZoom?(scaleFactor/1.25) }
     @objc private func contextBookmark() { NotificationCenter.default.post(name:Notification.Name("xreaderAddBookmark"),object:nil) }
@@ -352,5 +479,61 @@ class XReaderPDFView: PDFView, NSGestureRecognizerDelegate {
         guard t != lastSelectedText else { return }
         lastSelectedText = t
         onTextSelected?(t, NSRange(location: 0, length: t.count))
+    }
+}
+
+private final class HighlightColorMenuRowView: NSView {
+    private let colors: [AppState.HighlightColor]
+    private let activeColorID: String?
+    private let onSelectColorID: (String) -> Void
+    private let leadingInset: CGFloat = 44
+    private let dotSize: CGFloat = 16
+    private let dotSpacing: CGFloat = 18
+
+    override var isFlipped: Bool { true }
+
+    init(colors: [AppState.HighlightColor], activeColorID: String?, onSelectColorID: @escaping (String) -> Void) {
+        self.colors = colors
+        self.activeColorID = activeColorID
+        self.onSelectColorID = onSelectColorID
+        super.init(frame: NSRect(x: 0, y: 0, width: 240, height: 34))
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        for (index, highlight) in colors.enumerated() {
+            let rect = circleRect(at: index)
+            highlight.nsColor.setFill()
+            NSBezierPath(ovalIn: rect).fill()
+
+            let ringColor: NSColor = (highlight.id == activeColorID) ? .white : NSColor.black.withAlphaComponent(0.2)
+            ringColor.setStroke()
+            let ringPath = NSBezierPath(ovalIn: rect)
+            ringPath.lineWidth = (highlight.id == activeColorID) ? 2 : 1
+            ringPath.stroke()
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let tappedIndex = colors.indices.first(where: { circleRect(at: $0).contains(point) }) else {
+            super.mouseUp(with: event)
+            return
+        }
+
+        onSelectColorID(colors[tappedIndex].id)
+        enclosingMenuItem?.menu?.cancelTracking()
+    }
+
+    private func circleRect(at index: Int) -> NSRect {
+        let x = leadingInset + CGFloat(index) * (dotSize + dotSpacing)
+        let y = (bounds.height - dotSize) / 2
+        return NSRect(x: x, y: y, width: dotSize, height: dotSize)
     }
 }
