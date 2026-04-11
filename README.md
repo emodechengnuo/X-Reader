@@ -75,7 +75,7 @@
 ---
 
 ## 📄 开源许可
-# [本软件] - GNU General Public License v3.0 开源万岁！
+# [本软件] - GNU General Public License v3.0
 - [kokoro-coreml](https://github.com/Jud/kokoro-coreml) — MIT License
 - [English datasets from CEFR-J](https://github.com/openlanguageprofiles/olp-en-cefrj) — MIT License
 
