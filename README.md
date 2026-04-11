@@ -77,6 +77,7 @@
 ## 📄 开源许可
 
 - [kokoro-coreml](https://github.com/Jud/kokoro-coreml) — MIT License
+- [English datasets from CEFR-J](https://github.com/openlanguageprofiles/olp-en-cefrj) — MIT LicenseGitHub
 
 ---
 ## 目前待解决的问题：
