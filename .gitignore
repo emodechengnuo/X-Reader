@@ -2,3 +2,5 @@
 .DS_Store
 .workbuddy
 .build
+/build
+/build
