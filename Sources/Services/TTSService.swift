@@ -28,11 +28,10 @@ class TTSService: NSObject, ObservableObject {
         var onFinished: (() -> Void)?
         var onWord: ((NSRange, String) -> Void)?
         private var utteranceText: String = ""
-        private var wordsList: [String] = []
 
         func configure(text: String, words: [String]) {
             utteranceText = text
-            wordsList = words
+            _ = words
         }
 
         func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
@@ -54,9 +53,8 @@ class TTSService: NSObject, ObservableObject {
             characterRange utteranceRange: NSRange,
             of utterance: AVSpeechUtterance
         ) {
-            let nsText = (utteranceText as NSString)
-            let currentChars = nsText.substring(with: speechRange)
-            _ = wordsList.firstIndex(where: { $0.lowercased().hasPrefix(currentChars.lowercased()) })
+            _ = utteranceRange
+            guard onWord != nil else { return }
             onWord?(speechRange, utteranceText)
         }
     }
@@ -66,6 +64,7 @@ class TTSService: NSObject, ObservableObject {
     private var speakingCallback: ((Bool, Int) -> Void)?
     private var words: [String] = []
     private var currentWordIndex: Int = 0
+    private var lastEmittedWordIndex: Int = -1
     private var currentUtteranceText: String = ""
     private var currentPlaybackRate: Float = 1.0
 
@@ -404,23 +403,30 @@ class TTSService: NSObject, ObservableObject {
         // Extract voice name from "kokoro:af_heart" format
         let voiceName = voiceId.replacingOccurrences(of: "kokoro:", with: "")
 
-        Task { @MainActor in
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
             do {
                 let result = try engine.synthesize(text: text, voice: voiceName)
-                speakingCallback?(true, 0)
+                await MainActor.run { [weak self] in
+                    self?.speakingCallback?(true, 0)
+                }
 
-                // Play audio samples with rate control; mark finished only when playback really ends.
-                try playAudioSamples(result.samples, rate: currentPlaybackRate) { [weak self] in
-                    guard let self = self else { return }
-                    Task { @MainActor in
-                        self.speakingCallback?(false, 0)
-                        self.scheduleKokoroRelease()
+                // Keep synthesis off main thread; only audio graph setup/playback is on main.
+                try await MainActor.run {
+                    try self.playAudioSamples(result.samples, rate: self.currentPlaybackRate) { [weak self] in
+                        guard let self = self else { return }
+                        Task { @MainActor in
+                            self.speakingCallback?(false, 0)
+                            self.scheduleKokoroRelease()
+                        }
                     }
                 }
             } catch {
                 print("[TTSService] Kokoro synthesis failed: \(error)")
-                // Fall back to system voice
-                speakWithSystemVoice(text: text, voiceIdentifier: nil, rate: currentPlaybackRate)
+                await MainActor.run { [weak self] in
+                    // Fall back to system voice
+                    self?.speakWithSystemVoice(text: text, voiceIdentifier: nil, rate: self?.currentPlaybackRate ?? 1.0)
+                }
             }
         }
     }
@@ -429,17 +435,11 @@ class TTSService: NSObject, ObservableObject {
     private func speakWithSystemVoice(text: String, voiceIdentifier: String?, rate: Float) {
         words = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
         currentWordIndex = 0
+        lastEmittedWordIndex = -1
 
         speechDelegate.configure(text: text, words: words)
-        speechDelegate.onWord = { [weak self] range, _ in
-            guard let self = self else { return }
-            let nsText = (text as NSString)
-            let currentChars = nsText.substring(with: range)
-            if let idx = self.words.firstIndex(where: { $0.lowercased().hasPrefix(currentChars.lowercased()) }) {
-                self.currentWordIndex = idx
-            }
-            self.speakingCallback?(true, self.currentWordIndex)
-        }
+        // Disable high-frequency word callbacks for system voice to keep zoom/scroll smooth.
+        speechDelegate.onWord = nil
 
         let utterance = AVSpeechUtterance(string: text)
         // Slider range: 0.1~2.0, default 1.0
@@ -519,6 +519,7 @@ class TTSService: NSObject, ObservableObject {
         synthesizer.stopSpeaking(at: .immediate)
         speakingCallback = nil
         currentWordIndex = 0
+        lastEmittedWordIndex = -1
     }
 
     func pause() {

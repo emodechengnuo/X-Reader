@@ -28,7 +28,7 @@ struct MainView: View {
             }
             
             // Main content
-            if appState.document != nil {
+            if !appState.openTabs.isEmpty, appState.activeTabID != nil {
                 HStack(spacing: 0) {
                     // Left: Sidebar (outline + bookmarks)
                     if appState.showSidebar {
@@ -42,9 +42,16 @@ struct MainView: View {
                         Divider()
                     }
                     
-                    // Center: PDF Viewer
-                    PDFViewerView()
-                        .environmentObject(appState)
+                    // Center: Persistent tab viewers (switch by visibility, no redraw/rebind on tab switch)
+                    ZStack {
+                        ForEach(appState.openTabs) { tab in
+                            PDFViewerView(tabID: tab.id, document: tab.document)
+                                .environmentObject(appState)
+                                .opacity(appState.activeTabID == tab.id ? 1 : 0)
+                                .allowsHitTesting(appState.activeTabID == tab.id)
+                                .accessibilityHidden(appState.activeTabID != tab.id)
+                        }
+                    }
                     
                     // Right: Analysis Panel
                     if appState.showAnalysis {

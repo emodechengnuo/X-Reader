@@ -16,6 +16,10 @@ extension Notification.Name {
     static let xreaderSearchPDF = Notification.Name("xreaderSearchPDF")
 }
 
+enum XReaderNotificationUserInfoKey {
+    static let tabID = "tabID"
+}
+
 // MARK: - Bookmark model
 struct Bookmark: Identifiable, Codable, Equatable {
     let id: UUID
@@ -37,6 +41,9 @@ struct OpenPDFTab: Identifiable, Equatable {
     var title: String
     let document: PDFDocument
     var currentPage: Int
+    var scale: CGFloat
+    var viewportPageIndex: Int?
+    var viewportPoint: CGPoint?
     var totalPages: Int
     var outlineItems: [OutlineItem]
     var bookmarks: [Bookmark]
@@ -52,6 +59,10 @@ private struct PersistedOpenPDFTab: Codable {
     let path: String?
     let title: String
     let currentPage: Int
+    let scale: Double?
+    let viewportPageIndex: Int?
+    let viewportPointX: Double?
+    let viewportPointY: Double?
 }
 
 private struct PersistedTabSession: Codable {
@@ -75,6 +86,8 @@ class AppState: ObservableObject {
     /// Target page for PDFView to jump to AFTER it's created & document is set.
     /// Solves race condition: goToPage notification fires before PDFView exists.
     @Published var pendingTargetPage: Int? = nil
+    @Published var pendingViewportPageIndex: Int? = nil
+    @Published var pendingViewportPoint: CGPoint? = nil
     
     // Flag to prevent PDFView's page change notification from overwriting restored position
     private(set) var isRestoringPosition: Bool = false
@@ -618,14 +631,15 @@ class AppState: ObservableObject {
     }
 
     private func activePDFView() -> PDFView? {
-        if let view = NSApp.keyWindow?.contentView?.findPdfView() as? PDFView {
+        let targetTabID = activeTabID
+        if let view = NSApp.keyWindow?.contentView?.findPdfView(forTabID: targetTabID) as? PDFView {
             return view
         }
-        if let view = NSApp.mainWindow?.contentView?.findPdfView() as? PDFView {
+        if let view = NSApp.mainWindow?.contentView?.findPdfView(forTabID: targetTabID) as? PDFView {
             return view
         }
         for window in NSApp.orderedWindows {
-            if let view = window.contentView?.findPdfView() as? PDFView {
+            if let view = window.contentView?.findPdfView(forTabID: targetTabID) as? PDFView {
                 return view
             }
         }
@@ -676,9 +690,29 @@ class AppState: ObservableObject {
         guard activeTab.document === currentDocument else { return }
         guard totalPages > 0 else { return }
         openTabs[index].currentPage = currentPage
+        openTabs[index].scale = currentScale
+        if let pdfView = activePDFView(),
+           pdfView.document === currentDocument,
+           let snapshot = viewportSnapshot(from: pdfView, document: currentDocument) {
+            openTabs[index].viewportPageIndex = snapshot.pageIndex
+            openTabs[index].viewportPoint = snapshot.point
+        }
         openTabs[index].totalPages = totalPages
         openTabs[index].outlineItems = outlineItems
         openTabs[index].bookmarks = bookmarks
+    }
+
+    private func viewportSnapshot(from pdfView: PDFView, document: PDFDocument) -> (pageIndex: Int, point: CGPoint)? {
+        guard let currentPage = pdfView.currentPage else { return nil }
+        let pageIndex = document.index(for: currentPage)
+        guard pageIndex >= 0 else { return nil }
+        let visible = pdfView.visibleRect
+        let centerInView = CGPoint(x: visible.midX, y: visible.midY)
+        let pointOnPage = pdfView.convert(centerInView, to: currentPage)
+        if pointOnPage.x.isFinite && pointOnPage.y.isFinite {
+            return (pageIndex, pointOnPage)
+        }
+        return nil
     }
 
     private func resetReaderTransientState() {
@@ -694,6 +728,8 @@ class AppState: ObservableObject {
     private func activateTab(_ tabID: UUID, targetPage: Int? = nil, unlockDelay: TimeInterval = 0.7) {
         guard let index = openTabs.firstIndex(where: { $0.id == tabID }) else { return }
 
+        // Prevent background speech callbacks from a previous tab interfering with current tab state.
+        stopSpeaking()
         syncActiveTabStateFromRuntime()
 
         let tab = openTabs[index]
@@ -707,18 +743,32 @@ class AppState: ObservableObject {
             totalPages = tab.totalPages
             outlineItems = tab.outlineItems
             bookmarks = tab.bookmarks
+            currentScale = max(0.25, min(5.0, tab.scale))
             currentPage = safePage
             UserDefaults.standard.set(tab.url.absoluteString, forKey: lastOpenedPDFKey)
             resetReaderTransientState()
 
-            if let page = tab.document.page(at: safePage) {
-                NotificationCenter.default.post(name: .xreaderGoToPage, object: page)
+            if let pageIndex = tab.viewportPageIndex,
+               let point = tab.viewportPoint,
+               let page = tab.document.page(at: max(0, min(pageIndex, max(0, tab.totalPages - 1)))),
+               let pdfView = activePDFView(),
+               pdfView.document === tab.document {
+                let rect = CGRect(x: point.x - 1, y: point.y - 1, width: 2, height: 2)
+                pdfView.go(to: rect, on: page)
+            } else if let page = tab.document.page(at: safePage) {
+                NotificationCenter.default.post(
+                    name: .xreaderGoToPage,
+                    object: page,
+                    userInfo: [XReaderNotificationUserInfoKey.tabID: tab.id]
+                )
             }
             saveHiddenBookmark()
             return
         }
 
         pendingTargetPage = safePage
+        pendingViewportPageIndex = tab.viewportPageIndex
+        pendingViewportPoint = tab.viewportPoint
         isRestoringPosition = true
         isRestoringLayout = true
         isSwitchingTabs = true
@@ -730,6 +780,7 @@ class AppState: ObservableObject {
         totalPages = tab.totalPages
         outlineItems = tab.outlineItems
         bookmarks = tab.bookmarks
+        currentScale = max(0.25, min(5.0, tab.scale))
         currentPage = safePage
         UserDefaults.standard.set(tab.url.absoluteString, forKey: lastOpenedPDFKey)
         resetReaderTransientState()
@@ -742,6 +793,8 @@ class AppState: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + unlockDelay + 0.25) { [weak self] in
             self?.isRestoringLayout = false
             self?.pendingTargetPage = nil
+            self?.pendingViewportPageIndex = nil
+            self?.pendingViewportPoint = nil
         }
     }
 
@@ -763,6 +816,8 @@ class AppState: ObservableObject {
             totalPages = 0
             currentPage = 0
             pendingTargetPage = nil
+            pendingViewportPageIndex = nil
+            pendingViewportPoint = nil
             outlineItems = []
             bookmarks = []
             resetReaderTransientState()
@@ -807,6 +862,9 @@ class AppState: ObservableObject {
             title: currentTab.title,
             document: currentTab.document,
             currentPage: currentPage,
+            scale: currentScale,
+            viewportPageIndex: currentTab.viewportPageIndex,
+            viewportPoint: currentTab.viewportPoint,
             totalPages: currentTab.totalPages,
             outlineItems: currentTab.outlineItems,
             bookmarks: currentTab.bookmarks
@@ -830,6 +888,9 @@ class AppState: ObservableObject {
             title: displayTitle(for: doc, fallbackURL: url),
             document: doc,
             currentPage: safePage,
+            scale: currentScale,
+            viewportPageIndex: nil,
+            viewportPoint: nil,
             totalPages: doc.pageCount,
             outlineItems: outlineService.extractOutline(from: doc),
             bookmarks: bookmarksForURL(url)
@@ -858,6 +919,9 @@ class AppState: ObservableObject {
             title: displayTitle(for: doc, fallbackURL: url),
             document: doc,
             currentPage: safePage,
+            scale: currentScale,
+            viewportPageIndex: nil,
+            viewportPoint: nil,
             totalPages: doc.pageCount,
             outlineItems: outlineService.extractOutline(from: doc),
             bookmarks: bookmarksForURL(url)
@@ -872,7 +936,11 @@ class AppState: ObservableObject {
         let safeIndex = max(0, min(pageIndex, doc.pageCount - 1))
         if let page = doc.page(at: safeIndex) {
             currentPage = safeIndex
-            NotificationCenter.default.post(name: .xreaderGoToPage, object: page)
+            var info: [String: Any] = [:]
+            if let activeTabID {
+                info[XReaderNotificationUserInfoKey.tabID] = activeTabID
+            }
+            NotificationCenter.default.post(name: .xreaderGoToPage, object: page, userInfo: info)
         }
     }
     
@@ -924,7 +992,7 @@ class AppState: ObservableObject {
         let pageIndex = doc.index(for: page)
         goToPage(pageIndex)
         // Highlight
-        if let pdfView = NSApp.keyWindow?.contentView?.findPdfView() {
+        if let pdfView = activePDFView() {
             pdfView.setCurrentSelection(sel, animate: true)
             pdfView.go(to: sel)
         }
@@ -1058,8 +1126,13 @@ class AppState: ObservableObject {
         let voiceId = selectedVoiceId.isEmpty ? nil : selectedVoiceId
         ttsService.speak(selectedText, voiceIdentifier: voiceId) { [weak self] speaking, wordIndex in
             DispatchQueue.main.async {
-                self?.isSpeaking = speaking
-                self?.currentWordIndex = wordIndex
+                guard let self else { return }
+                if self.isSpeaking != speaking {
+                    self.isSpeaking = speaking
+                }
+                if self.currentWordIndex != wordIndex {
+                    self.currentWordIndex = wordIndex
+                }
             }
         }
     }
@@ -1309,7 +1382,11 @@ class AppState: ObservableObject {
                 url: tab.url.absoluteString,
                 path: tab.url.path,
                 title: tab.title,
-                currentPage: tab.currentPage
+                currentPage: tab.currentPage,
+                scale: Double(tab.scale),
+                viewportPageIndex: tab.viewportPageIndex,
+                viewportPointX: tab.viewportPoint.map { Double($0.x) },
+                viewportPointY: tab.viewportPoint.map { Double($0.y) }
             )
         }
         let session = PersistedTabSession(tabs: persistedTabs, activeTabID: activeTabID)
@@ -1332,12 +1409,20 @@ class AppState: ObservableObject {
                   let doc = cachedDocument(for: url) else { continue }
 
             let safePage = max(0, min(item.currentPage, max(0, doc.pageCount - 1)))
+            let safeScale = max(0.25, min(5.0, CGFloat(item.scale ?? 1.0)))
+            let viewportPoint: CGPoint? = {
+                guard let x = item.viewportPointX, let y = item.viewportPointY else { return nil }
+                return CGPoint(x: x, y: y)
+            }()
             let tab = OpenPDFTab(
                 id: item.id,
                 url: url,
                 title: item.title.isEmpty ? displayTitle(for: doc, fallbackURL: url) : item.title,
                 document: doc,
                 currentPage: safePage,
+                scale: safeScale,
+                viewportPageIndex: item.viewportPageIndex,
+                viewportPoint: viewportPoint,
                 totalPages: doc.pageCount,
                 outlineItems: outlineService.extractOutline(from: doc),
                 bookmarks: bookmarksForURL(url)
@@ -1400,10 +1485,16 @@ private extension NSColor {
 // MARK: - Helper: find PDFView in view hierarchy
 
 extension NSView {
-    func findPdfView() -> PDFView? {
-        if let pdfView = self as? PDFView { return pdfView }
+    func findPdfView(forTabID tabID: UUID? = nil) -> PDFView? {
+        if let pdfView = self as? XReaderPDFView {
+            if tabID == nil || pdfView.tabID == tabID {
+                return pdfView
+            }
+        } else if let pdfView = self as? PDFView, tabID == nil {
+            return pdfView
+        }
         for subview in subviews {
-            if let found = subview.findPdfView() { return found }
+            if let found = subview.findPdfView(forTabID: tabID) { return found }
         }
         return nil
     }

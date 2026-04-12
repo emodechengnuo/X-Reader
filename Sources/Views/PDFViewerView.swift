@@ -11,15 +11,18 @@ import PDFKit
 
 struct PDFViewerView: NSViewRepresentable {
     @EnvironmentObject var appState: AppState
+    let tabID: UUID
+    let document: PDFDocument
 
     func makeNSView(context: Context) -> XReaderPDFView {
         let pdfView = XReaderPDFView()
+        pdfView.tabID = tabID
         pdfView.autoScales = true
         pdfView.displayMode = .singlePageContinuous
         pdfView.backgroundColor = .underPageBackgroundColor
         pdfView.minScaleFactor = 0.25
         pdfView.maxScaleFactor = 5.0
-        pdfView.document = appState.document
+        pdfView.document = document
 
         // Text selection callback — analyze selected text
         pdfView.onTextSelected = { [weak appState] text, range in
@@ -44,7 +47,15 @@ struct PDFViewerView: NSViewRepresentable {
             queue: .main
         ) { [weak pdfView] notification in
             guard let page = notification.object as? PDFPage else { return }
-            pdfView?.go(to: page)
+            guard let view = pdfView else { return }
+            if let targetTabID = notification.userInfo?[XReaderNotificationUserInfoKey.tabID] as? UUID,
+               targetTabID != view.tabID {
+                return
+            }
+            // Ignore stale page jumps from another document/tab/window.
+            if page.document === view.document {
+                view.go(to: page)
+            }
         }
 
         context.coordinator.attachPDFObservers(to: pdfView)
@@ -53,9 +64,8 @@ struct PDFViewerView: NSViewRepresentable {
     }
 
     func updateNSView(_ pdfView: XReaderPDFView, context: Context) {
-        let targetDocument = appState.document
-
-        // Avoid resetting document on every state update: this causes visible flicker.
+        pdfView.tabID = tabID
+        let targetDocument = document
         if pdfView.document !== targetDocument {
             pdfView.document = targetDocument
             context.coordinator.lastAppliedPendingTarget = nil
@@ -63,8 +73,9 @@ struct PDFViewerView: NSViewRepresentable {
         }
 
         // Apply pending target only once per (document, page) pair.
-        if let targetPage = appState.pendingTargetPage,
-           let doc = targetDocument {
+        if appState.activeTabID == tabID,
+           let targetPage = appState.pendingTargetPage {
+            let doc = targetDocument
             let safeIndex = max(0, min(targetPage, doc.pageCount - 1))
             let docID = ObjectIdentifier(doc)
             let alreadyApplied =
@@ -74,16 +85,29 @@ struct PDFViewerView: NSViewRepresentable {
             if !alreadyApplied, let targetPDFPage = doc.page(at: safeIndex) {
                 context.coordinator.lastAppliedPendingDocumentID = docID
                 context.coordinator.lastAppliedPendingTarget = safeIndex
+                let viewportPageIndex = appState.pendingViewportPageIndex
+                let viewportPoint = appState.pendingViewportPoint
+
                 DispatchQueue.main.async { [weak pdfView] in
-                    pdfView?.go(to: targetPDFPage)
+                    guard let view = pdfView else { return }
+                    if let vpIndex = viewportPageIndex,
+                       let vpPoint = viewportPoint,
+                       let vpPage = doc.page(at: max(0, min(vpIndex, doc.pageCount - 1))) {
+                        let rect = CGRect(x: vpPoint.x - 1, y: vpPoint.y - 1, width: 2, height: 2)
+                        view.go(to: rect, on: vpPage)
+                    } else {
+                        view.go(to: targetPDFPage)
+                    }
                 }
             }
         }
 
         // Only set scale if it's different (avoid feedback loop)
-        let targetScale = appState.currentScale
-        if abs(pdfView.scaleFactor - targetScale) > 0.001 {
-            pdfView.scaleFactor = targetScale
+        if appState.activeTabID == tabID {
+            let targetScale = appState.currentScale
+            if abs(pdfView.scaleFactor - targetScale) > 0.001 {
+                pdfView.scaleFactor = targetScale
+            }
         }
     }
 
@@ -106,6 +130,8 @@ struct PDFViewerView: NSViewRepresentable {
         var lastAppliedPendingTarget: Int?
         private weak var observedPDFView: PDFView?
         private var selectionDebounceWork: DispatchWorkItem?
+        private var scaleDebounceWork: DispatchWorkItem?
+        private var lastScalePublishTimestamp: CFAbsoluteTime = 0
         private var lastForwardedText: String = ""
 
         init(appState: AppState) {
@@ -114,6 +140,7 @@ struct PDFViewerView: NSViewRepresentable {
 
         deinit {
             selectionDebounceWork?.cancel()
+            scaleDebounceWork?.cancel()
             if let observer = goToPageObserver {
                 NotificationCenter.default.removeObserver(observer)
             }
@@ -157,6 +184,7 @@ struct PDFViewerView: NSViewRepresentable {
             guard let pdfView = notification.object as? PDFView,
                   let currentPage = pdfView.currentPage,
                   let document = pdfView.document else { return }
+            guard appState.activeTabID == (pdfView as? XReaderPDFView)?.tabID else { return }
 
             let pageIndex = document.index(for: currentPage)
             guard !appState.isRestoringPosition, !appState.isRestoringLayout else { return }
@@ -165,12 +193,36 @@ struct PDFViewerView: NSViewRepresentable {
 
         @objc func pdfViewScaleChanged(_ notification: Notification) {
             guard let pdfView = notification.object as? PDFView else { return }
-            appState.currentScale = pdfView.scaleFactor
+            guard appState.activeTabID == (pdfView as? XReaderPDFView)?.tabID else { return }
+            let newScale = pdfView.scaleFactor
+            guard abs(appState.currentScale - newScale) > 0.001 else { return }
+
+            let now = CFAbsoluteTimeGetCurrent()
+            let minInterval: CFTimeInterval = appState.isSpeaking ? 0.12 : 0.05
+
+            if now - lastScalePublishTimestamp >= minInterval {
+                lastScalePublishTimestamp = now
+                appState.currentScale = newScale
+                return
+            }
+
+            scaleDebounceWork?.cancel()
+            let pendingScale = newScale
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.lastScalePublishTimestamp = CFAbsoluteTimeGetCurrent()
+                if abs(self.appState.currentScale - pendingScale) > 0.001 {
+                    self.appState.currentScale = pendingScale
+                }
+            }
+            scaleDebounceWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + minInterval, execute: work)
         }
 
         // MARK: - Selection monitoring via PDFViewSelectionChanged notification
         @objc func pdfViewSelectionChanged(_ notification: Notification) {
             guard let pdfView = notification.object as? PDFView else { return }
+            guard appState.activeTabID == (pdfView as? XReaderPDFView)?.tabID else { return }
             selectionDebounceWork?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
@@ -202,6 +254,7 @@ struct PDFViewerView: NSViewRepresentable {
 // MARK: - Custom PDFView with selection & pinch zoom
 
 class XReaderPDFView: PDFView, NSGestureRecognizerDelegate {
+    var tabID: UUID?
     private var lastSelectedText: String = ""
     private var lastMenuEventPoint: NSPoint?
     var onTextSelected: ((String, NSRange) -> Void)?
