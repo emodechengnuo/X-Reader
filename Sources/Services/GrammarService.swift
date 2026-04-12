@@ -62,12 +62,14 @@ class GrammarService {
             
             let word = String(text[tokenRange])
             let lemma = tagger.tag(at: tokenRange.lowerBound, unit: .word, scheme: .lemma).0?.rawValue ?? word
-            let posName = posDisplayName(tag)
+            let posTags = posCandidates(tagger: tagger, tokenRange: tokenRange, fallbackTag: tag)
+            let posName = posTags.first ?? posDisplayName(tag)
             let difficulty = estimateDifficulty(word: word, lemma: lemma)
             
             details.append(WordDetail(
                 word: word,
                 pos: posName,
+                posTags: posTags,
                 lemma: lemma,
                 meaning: nil, // Will be filled by TranslationService with caching
                 difficulty: difficulty,
@@ -101,8 +103,40 @@ class GrammarService {
         case .openParenthesis: return "左括号"
         case .closeParenthesis: return "右括号"
         case .dash: return "破折号"
+        case .otherWord: return ""
         default: return tag.rawValue
         }
+    }
+
+    private func posCandidates(tagger: NLTagger, tokenRange: Range<String.Index>, fallbackTag: NLTag) -> [String] {
+        let (hypotheses, _) = tagger.tagHypotheses(
+            at: tokenRange.lowerBound,
+            unit: .word,
+            scheme: .lexicalClass,
+            maximumCount: 4
+        )
+
+        var candidates: [String] = hypotheses
+            .keys
+            .compactMap { NLTag(rawValue: $0) }
+            .map(posDisplayName)
+            .filter { !$0.isEmpty }
+
+        // If a generic tag appears together with real tags, hide the generic one.
+        if candidates.count > 1 {
+            candidates.removeAll { $0 == "未知" || $0 == "词" || $0.lowercased() == "otherword" }
+        }
+
+        if candidates.isEmpty {
+            let fallback = posDisplayName(fallbackTag)
+            if !fallback.isEmpty {
+                candidates = [fallback]
+            }
+        }
+
+        // Keep stable order and remove duplicates.
+        var seen = Set<String>()
+        return candidates.filter { seen.insert($0).inserted }
     }
     
     private func estimateDifficulty(word: String, lemma: String) -> String {

@@ -146,6 +146,9 @@ class AppState: ObservableObject {
     
     // MARK: - Word Analysis
     @Published var wordAnalysis: GrammarResult?
+    @Published var lookedUpWords: [WordDetail] = [] {
+        didSet { saveLookedUpWords() }
+    }
     
     // MARK: - OCR
     @Published var isOCRRunning: Bool = false
@@ -292,6 +295,7 @@ class AppState: ObservableObject {
     private let tabsSessionKey = "xreader_tabs_session_v1"
     private let sidebarVisibleKey = "xreader_sidebar_visible"
     private let analysisPanelVisibleKey = "xreader_analysis_panel_visible"
+    private let lookedUpWordsKey = "xreader_looked_up_words_v1"
 
     /// Hidden bookmark key — stores the page position on app close, consumed on next launch
     private let hiddenBookmarkKey = "xreader_hidden_bookmark"
@@ -304,6 +308,8 @@ class AppState: ObservableObject {
         if let lang = AppLanguage(rawValue: langStr) {
             L10n.shared.language = lang
         }
+
+        loadLookedUpWords()
 
         // === First-launch default layout ===
         let isFirstLaunch = UserDefaults.standard.object(forKey: sidebarVisibleKey) == nil
@@ -999,10 +1005,11 @@ class AppState: ObservableObject {
             
             // Update UI immediately with cached results
             wordAnalysis = analysis
+            mergeIntoLookedUpWords(analysis.wordDetails)
             
             // Fetch missing translations in background
-            let uncachedWords = words.filter { 
-                wordTranslationCache.getTranslation(for: $0) == nil 
+            let uncachedWords = words.filter {
+                wordTranslationCache.shouldFetchAutoTranslation(for: $0)
             }
             
             if !uncachedWords.isEmpty {
@@ -1023,9 +1030,25 @@ class AppState: ObservableObject {
                 
                 // Re-assign to trigger UI update
                 wordAnalysis = analysis
+                mergeIntoLookedUpWords(analysis.wordDetails)
             }
         } else {
             wordAnalysis = analysis
+            mergeIntoLookedUpWords(analysis.wordDetails)
+        }
+    }
+
+    func applyManualMeaning(_ newMeaning: String, for word: WordDetail) {
+        let trimmed = newMeaning.trimmingCharacters(in: .whitespacesAndNewlines)
+        wordTranslationCache.setTranslationForWord(trimmed, for: word.word)
+
+        if let idx = wordAnalysis?.wordDetails.firstIndex(where: { $0.id == word.id }) {
+            wordAnalysis?.wordDetails[idx].meaning = trimmed.isEmpty ? nil : trimmed
+        }
+
+        let normalizedWord = normalizeWordKey(word.word)
+        if let idx = lookedUpWords.firstIndex(where: { normalizeWordKey($0.word) == normalizedWord }) {
+            lookedUpWords[idx].meaning = trimmed.isEmpty ? nil : trimmed
         }
     }
     
@@ -1147,6 +1170,98 @@ class AppState: ObservableObject {
         let key = bookmarksKey + "_" + sanitizeForUserDefaults(url.absoluteString)
         if let data = try? JSONEncoder().encode(bookmarks) {
             UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+
+    private func mergeIntoLookedUpWords(_ words: [WordDetail]) {
+        guard !words.isEmpty else { return }
+        var merged = lookedUpWords
+
+        for incoming in words {
+            let key = normalizeWordKey(incoming.word)
+            if let idx = merged.firstIndex(where: { normalizeWordKey($0.word) == key }) {
+                var existing = merged[idx]
+                existing.lemma = incoming.lemma
+                existing.difficulty = harderDifficulty(existing.difficulty, incoming.difficulty)
+                existing.posTags = mergedPosTags(existing, incoming)
+                existing.posTags = sanitizePosTags(existing.posTags)
+                if let manualOrCached = wordTranslationCache.getTranslation(for: incoming.word) {
+                    existing.meaning = manualOrCached
+                } else if existing.meaning == nil {
+                    existing.meaning = incoming.meaning
+                }
+                existing.pos = existing.posTags.first ?? sanitizePosTags([incoming.pos]).first ?? ""
+                merged[idx] = existing
+            } else {
+                var copy = incoming
+                if copy.posTags.isEmpty { copy.posTags = [copy.pos] }
+                copy.posTags = sanitizePosTags(copy.posTags)
+                copy.pos = copy.posTags.first ?? ""
+                if let manualOrCached = wordTranslationCache.getTranslation(for: incoming.word) {
+                    copy.meaning = manualOrCached
+                }
+                merged.append(copy)
+            }
+        }
+
+        lookedUpWords = merged
+    }
+
+    private func mergedPosTags(_ a: WordDetail, _ b: WordDetail) -> [String] {
+        let source = (a.posTags.isEmpty ? [a.pos] : a.posTags) + (b.posTags.isEmpty ? [b.pos] : b.posTags)
+        var seen = Set<String>()
+        return source.filter { seen.insert($0).inserted }
+    }
+
+    private func sanitizePosTags(_ tags: [String]) -> [String] {
+        let cleaned = tags
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { tag in
+                guard !tag.isEmpty else { return false }
+                let lower = tag.lowercased()
+                return lower != "otherword" && tag != "未知" && tag != "词" && lower != "word"
+            }
+        return cleaned
+    }
+
+    private func harderDifficulty(_ lhs: String, _ rhs: String) -> String {
+        let l = difficultyRank(lhs)
+        let r = difficultyRank(rhs)
+        return l >= r ? lhs : rhs
+    }
+
+    private func difficultyRank(_ value: String) -> Int {
+        let upper = value.uppercased()
+        if upper.contains("C2") { return 6 }
+        if upper.contains("C1") { return 5 }
+        if upper.contains("B2") { return 4 }
+        if upper.contains("B1") { return 3 }
+        if upper.contains("A2") { return 2 }
+        return 1
+    }
+
+    private func normalizeWordKey(_ word: String) -> String {
+        word.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func saveLookedUpWords() {
+        if let data = try? JSONEncoder().encode(lookedUpWords) {
+            UserDefaults.standard.set(data, forKey: lookedUpWordsKey)
+        }
+    }
+
+    private func loadLookedUpWords() {
+        guard let data = UserDefaults.standard.data(forKey: lookedUpWordsKey),
+              let saved = try? JSONDecoder().decode([WordDetail].self, from: data) else {
+            lookedUpWords = []
+            return
+        }
+        lookedUpWords = saved.map { item in
+            var copy = item
+            let tags = sanitizePosTags(copy.posTags.isEmpty ? [copy.pos] : copy.posTags)
+            copy.posTags = tags
+            copy.pos = tags.first ?? ""
+            return copy
         }
     }
     

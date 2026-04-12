@@ -16,9 +16,15 @@ class WordTranslationCache {
     static let shared = WordTranslationCache()
     
     // MARK: - Properties
+
+    private struct Entry: Codable {
+        var meaning: String
+        var isManual: Bool
+        var autoFetchedOnce: Bool
+    }
     
     private let cacheURL: URL
-    private var memoryCache: [String: String] = [:]
+    private var memoryCache: [String: Entry] = [:]
     private let fileQueue = DispatchQueue(label: "com.xreader.wordcache", qos: .utility)
     private let translationService: TranslationService?
     
@@ -54,7 +60,8 @@ class WordTranslationCache {
         
         // 1. Check memory cache first (fastest)
         if let cached = memoryCache[key] {
-            return cached
+            let value = cached.meaning.trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
         }
         
         return nil
@@ -63,7 +70,36 @@ class WordTranslationCache {
     /// Manually set/save a user-edited translation for a word.
     func setTranslationForWord(_ meaning: String, for word: String) {
         let key = normalizeKey(word)
-        setTranslation(meaning, for: key)
+        let trimmed = meaning.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            memoryCache.removeValue(forKey: key)
+            fileQueue.async { [weak self] in
+                self?.saveCache()
+            }
+            return
+        }
+        setEntry(
+            Entry(
+                meaning: trimmed,
+                isManual: true,
+                autoFetchedOnce: true
+            ),
+            for: key
+        )
+    }
+
+    /// If user manually edited this word, automatic updates must not overwrite it.
+    func isManualLocked(_ word: String) -> Bool {
+        let key = normalizeKey(word)
+        return memoryCache[key]?.isManual == true
+    }
+
+    /// Auto lookup should only happen once for non-manual words.
+    func shouldFetchAutoTranslation(for word: String) -> Bool {
+        let key = normalizeKey(word)
+        guard let entry = memoryCache[key] else { return true }
+        if entry.isManual { return false }
+        return !entry.autoFetchedOnce
     }
     
     /// Get or fetch translation asynchronously.
@@ -75,7 +111,7 @@ class WordTranslationCache {
         
         // 1. Check memory cache first
         if let cached = memoryCache[key] {
-            completion(cached)
+            completion(cached.meaning)
             return
         }
         
@@ -84,7 +120,8 @@ class WordTranslationCache {
             // Will be available soon — retry after delay
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 if let result = self?.memoryCache[key] {
-                    completion(result)
+                    let value = result.meaning.trimmingCharacters(in: .whitespacesAndNewlines)
+                    completion(value.isEmpty ? nil : value)
                 } else {
                     completion(nil) // Give up after one retry
                 }
@@ -109,9 +146,10 @@ class WordTranslationCache {
                 }
                 
                 if !translated.isEmpty {
-                    self?.setTranslation(translated, for: key)
+                    self?.setAutoTranslationOnce(translated, for: key)
                     completion(translated)
                 } else {
+                    self?.markAutoFetchAttempted(for: key)
                     completion(nil)
                 }
             }
@@ -129,9 +167,16 @@ class WordTranslationCache {
         
         for word in words {
             let key = normalizeKey(word)
+
+            guard shouldFetchAutoTranslation(for: word) else {
+                if let cached = memoryCache[key]?.meaning {
+                    results[word] = cached
+                }
+                continue
+            }
             
             // Double-check cache (might have been filled by another call)
-            if let cached = memoryCache[key] {
+            if let cached = memoryCache[key]?.meaning {
                 results[word] = cached
                 continue
             }
@@ -144,11 +189,14 @@ class WordTranslationCache {
                 // If it's suspiciously long (>30 chars), it might be a sentence translation error
                 let cleanTranslation = translated.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                 if cleanTranslation.count <= 30 {
-                    setTranslation(cleanTranslation, for: key)
+                    setAutoTranslationOnce(cleanTranslation, for: key)
                     results[word] = cleanTranslation
                 } else {
                     print("[WordTranslationCache] Suspiciously long translation for '\(word)': '\(cleanTranslation)' — skipping")
+                    markAutoFetchAttempted(for: key)
                 }
+            } else {
+                markAutoFetchAttempted(for: key)
             }
             
             // Small delay between API calls to avoid rate limiting
@@ -160,13 +208,52 @@ class WordTranslationCache {
     
     // MARK: - Private Methods
     
-    private func setTranslation(_ translation: String, for key: String) {
-        memoryCache[key] = translation
+    private func setEntry(_ entry: Entry, for key: String) {
+        memoryCache[key] = entry
         
         // Save to disk asynchronously (don't block UI)
         fileQueue.async { [weak self] in
             self?.saveCache()
         }
+    }
+
+    private func setAutoTranslationOnce(_ translation: String, for key: String) {
+        let trimmed = translation.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if let existing = memoryCache[key], existing.isManual {
+            return
+        }
+        setEntry(
+            Entry(
+                meaning: trimmed,
+                isManual: false,
+                autoFetchedOnce: true
+            ),
+            for: key
+        )
+    }
+
+    private func markAutoFetchAttempted(for key: String) {
+        if let existing = memoryCache[key] {
+            if existing.isManual || existing.autoFetchedOnce { return }
+            setEntry(
+                Entry(
+                    meaning: existing.meaning,
+                    isManual: false,
+                    autoFetchedOnce: true
+                ),
+                for: key
+            )
+            return
+        }
+        setEntry(
+            Entry(
+                meaning: "",
+                isManual: false,
+                autoFetchedOnce: true
+            ),
+            for: key
+        )
     }
     
     private func normalizeKey(_ word: String) -> String {
@@ -183,8 +270,24 @@ class WordTranslationCache {
         
         do {
             let data = try Data(contentsOf: cacheURL)
-            let decoded = try JSONDecoder().decode([String: String].self, from: data)
-            memoryCache = decoded
+            if let decodedV2 = try? JSONDecoder().decode([String: Entry].self, from: data) {
+                memoryCache = decodedV2
+                return
+            }
+
+            // Backward-compatibility for legacy cache: [String: String]
+            if let decodedV1 = try? JSONDecoder().decode([String: String].self, from: data) {
+                memoryCache = decodedV1.reduce(into: [:]) { partialResult, pair in
+                    partialResult[pair.key] = Entry(
+                        meaning: pair.value,
+                        isManual: false,
+                        autoFetchedOnce: true
+                    )
+                }
+                return
+            }
+
+            memoryCache = [:]
         } catch {
             print("[WordTranslationCache] Error loading cache: \(error)")
             memoryCache = [:]

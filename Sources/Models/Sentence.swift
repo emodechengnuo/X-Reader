@@ -37,12 +37,13 @@ struct POSResult: Identifiable {
 
 // MARK: - Word Detail
 
-struct WordDetail: Identifiable {
-    let id = UUID()
+struct WordDetail: Identifiable, Codable {
+    var id: UUID = UUID()
     let word: String
-    let pos: String
-    let lemma: String
+    var pos: String
+    var posTags: [String] = []
+    var lemma: String
     var meaning: String?      // Chinese meaning (mutable — filled by translation cache)
-    let difficulty: String    // CEFR level
+    var difficulty: String    // CEFR level
     let phonetic: String?     // Phonetic transcription
 }

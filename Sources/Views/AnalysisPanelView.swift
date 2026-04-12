@@ -337,7 +337,12 @@ struct TranslationTabContent: View {
                             .padding(.vertical, 6)
                     } else {
                         ForEach(filteredWords) { word in
-                            WordCardView(word: word)
+                            WordCardView(
+                                word: word,
+                                onEditMeaning: { newMeaning in
+                                    appState.applyManualMeaning(newMeaning, for: word)
+                                }
+                            )
                         }
                     }
                 }
@@ -357,8 +362,7 @@ struct WordsTabContent: View {
     private func t(_ key: L10nKey) -> String { l10n.string(key) }
 
     private var filteredWords: [WordDetail] {
-        guard let details = appState.wordAnalysis?.wordDetails else { return [] }
-        return filterWords(details, query: wordSearchQuery, minimumLevel: minimumWordLevel)
+        filterWords(appState.lookedUpWords, query: wordSearchQuery, minimumLevel: minimumWordLevel)
     }
     
     var body: some View {
@@ -382,24 +386,17 @@ struct WordsTabContent: View {
                 showSearchField: true
             )
             
-            if appState.wordAnalysis != nil {
+            if !appState.lookedUpWords.isEmpty {
                 ForEach(filteredWords) { word in
                     WordCardView(
                         word: word,
                         onEditMeaning: { newMeaning in
-                            // Update the meaning in the analysis (find by stable id)
-                            if let idx = appState.wordAnalysis?.wordDetails.firstIndex(where: { $0.id == word.id }) {
-                                appState.wordAnalysis?.wordDetails[idx].meaning = newMeaning.isEmpty ? nil : newMeaning
-                            }
-                            // Persist to cache
-                            if !newMeaning.isEmpty {
-                                appState.wordTranslationCache.setTranslationForWord(newMeaning, for: word.word)
-                            }
+                            appState.applyManualMeaning(newMeaning, for: word)
                         }
                     )
                 }
             } else {
-                Text(t(.wordsHint))
+                Text(l10n.language == .chinese ? "还没有查过的单词" : "No looked-up words yet")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, minHeight: 100)
@@ -529,30 +526,12 @@ struct TTSTabContent: View {
 // MARK: - Supporting Views
 
 struct WordCardView: View {
+    @ObservedObject private var l10n = L10n.shared
     @State private var isEditing = false
     @State private var editedText: String = ""
     
     let word: WordDetail
     var onEditMeaning: ((String) -> Void)?
-    
-    private var tagColor: Color {
-        switch word.pos {
-        case "名词": return .blue
-        case "动词": return .green
-        case "形容词": return .orange
-        case "副词": return .purple
-        case "代词": return .red
-        case "介词": return .cyan
-        case "连词": return .indigo
-        case "限定词": return .teal
-        case "感叹词": return .pink
-        case "助词": return .mint
-        case "量词": return .brown
-        case "习语": return .yellow
-        case "引号", "左括号", "右括号", "破折号": return .gray
-        default: return .gray
-        }
-    }
     
     private var shouldShowMeaning: Bool {
         guard let m = word.meaning, !m.isEmpty else { return false }
@@ -567,18 +546,19 @@ struct WordCardView: View {
                 Text(word.word)
                     .font(.subheadline)
                     .fontWeight(.semibold)
-                HStack(spacing: 6) {
-                    // POS tag with color
-                    Text(word.pos)
-                        .font(.system(size: 9))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(tagColor)
-                        .cornerRadius(4)
-                    
-                    // Difficulty badge
-                    Text(word.difficulty)
+                HStack(spacing: 4) {
+                    let tags = displayPOSTags
+                    ForEach(tags.prefix(3), id: \.self) { pos in
+                        Text(pos)
+                            .font(.system(size: 9))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(tagColor(for: pos))
+                            .cornerRadius(4)
+                    }
+
+                    Text(displayDifficulty)
                         .font(.system(size: 9))
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 6)
@@ -650,6 +630,92 @@ struct WordCardView: View {
             RoundedRectangle(cornerRadius: 6)
                 .stroke(isEditing ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: isEditing ? 1.5 : 1)
         )
+    }
+
+    private var displayPOSTags: [String] {
+        let raw = (word.posTags.isEmpty ? [word.pos] : word.posTags)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .filter { !["未知", "词", "otherword", "word"].contains($0.lowercased()) }
+
+        var seen = Set<String>()
+        let localized = raw
+            .map(localizedPOS)
+            .filter { seen.insert($0).inserted }
+        return localized
+    }
+
+    private var displayDifficulty: String {
+        if l10n.language == .chinese {
+            return word.difficulty
+        }
+        let upper = word.difficulty.uppercased()
+        if upper.contains("C1/C2") { return "C2" }
+        if upper.contains("C2") { return "C2" }
+        if upper.contains("C1") { return "C1" }
+        if upper.contains("B2") { return "B2" }
+        if upper.contains("B1") { return "B1" }
+        if upper.contains("A2") { return "A2" }
+        if upper.contains("A1") { return "A1" }
+        return word.difficulty
+    }
+
+    private func localizedPOS(_ pos: String) -> String {
+        if l10n.language == .chinese {
+            switch pos.lowercased() {
+            case "noun": return "名词"
+            case "verb": return "动词"
+            case "adjective": return "形容词"
+            case "adverb": return "副词"
+            case "pronoun": return "代词"
+            case "determiner": return "限定词"
+            case "preposition": return "介词"
+            case "conjunction": return "连词"
+            case "interjection": return "感叹词"
+            case "particle": return "助词"
+            case "classifier": return "量词"
+            case "idiom": return "习语"
+            default: return pos
+            }
+        }
+
+        switch pos {
+        case "名词": return "Noun"
+        case "动词": return "Verb"
+        case "形容词": return "Adjective"
+        case "副词": return "Adverb"
+        case "代词": return "Pronoun"
+        case "限定词": return "Determiner"
+        case "介词": return "Preposition"
+        case "连词": return "Conjunction"
+        case "感叹词": return "Interjection"
+        case "助词": return "Particle"
+        case "量词": return "Classifier"
+        case "习语": return "Idiom"
+        case "引号": return "Quote"
+        case "左括号": return "LParen"
+        case "右括号": return "RParen"
+        case "破折号": return "Dash"
+        default: return pos
+        }
+    }
+
+    private func tagColor(for pos: String) -> Color {
+        switch pos {
+        case "名词", "Noun": return .blue
+        case "动词", "Verb": return .green
+        case "形容词", "Adjective": return .orange
+        case "副词", "Adverb": return .purple
+        case "代词", "Pronoun": return .red
+        case "介词", "Preposition": return .cyan
+        case "连词", "Conjunction": return .indigo
+        case "限定词", "Determiner": return .teal
+        case "感叹词", "Interjection": return .pink
+        case "助词", "Particle": return .mint
+        case "量词", "Classifier": return .brown
+        case "习语", "Idiom": return .yellow
+        default: return .gray
+        }
     }
     
     private func confirmEdit() {
