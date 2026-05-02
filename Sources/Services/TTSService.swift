@@ -395,8 +395,20 @@ class TTSService: NSObject, ObservableObject {
     /// Speak using Kokoro TTS
     private func speakWithKokoro(text: String, voiceId: String) {
         guard let engine = kokoroEngine else {
-            print("[TTSService] Kokoro model not ready, falling back to system voice")
-            speakWithSystemVoice(text: text, voiceIdentifier: nil, rate: currentPlaybackRate)
+            // Model was auto-released (idle timeout) — reload and retry instead of falling back
+            guard !isKokoroLoading else {
+                print("[TTSService] Kokoro model is loading, ignoring duplicate speak request")
+                return
+            }
+            print("[TTSService] Kokoro model was released, auto-reloading...")
+            Task { [weak self] in
+                guard let self else { return }
+                await self.loadKokoroModel()
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.speakWithKokoro(text: text, voiceId: voiceId)
+                }
+            }
             return
         }
 

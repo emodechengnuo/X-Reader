@@ -9,6 +9,24 @@
 import SwiftUI
 import PDFKit
 
+// MARK: - NSSearchField subclass that reliably handles ⌘V/C/X/A
+// SwiftUI NSViewRepresentable wrapping can sometimes prevent the field editor from
+// receiving key equivalents directly; overriding performKeyEquivalent ensures paste always works.
+private class PasteableSearchField: NSSearchField {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // Only handle plain ⌘ combos (no additional modifiers)
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard mods == .command else { return super.performKeyEquivalent(with: event) }
+        switch event.charactersIgnoringModifiers?.lowercased() {
+        case "v": return NSApp.sendAction(#selector(NSText.paste(_:)),     to: nil, from: self)
+        case "c": return NSApp.sendAction(#selector(NSText.copy(_:)),      to: nil, from: self)
+        case "x": return NSApp.sendAction(#selector(NSText.cut(_:)),       to: nil, from: self)
+        case "a": return NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: self)
+        default:  return super.performKeyEquivalent(with: event)
+        }
+    }
+}
+
 // MARK: - NSSearchField wrapper to bypass SwiftUI TextField focus issues
 
 struct SearchFieldRepresentable: NSViewRepresentable {
@@ -17,9 +35,11 @@ struct SearchFieldRepresentable: NSViewRepresentable {
     let onEnter: () -> Void
     let onShiftEnter: () -> Void
     @Binding var shouldFocus: Bool
+    /// 创建完 NSSearchField 后回调，供调用方持有引用（closeSearch 清理用）
+    var onFieldCreated: ((NSSearchField) -> Void)? = nil
 
     func makeNSView(context: Context) -> NSSearchField {
-        let searchField = NSSearchField()
+        let searchField = PasteableSearchField()
         searchField.placeholderString = placeholder
         searchField.font = NSFont.systemFont(ofSize: 13)
         searchField.isBordered = true
@@ -37,6 +57,9 @@ struct SearchFieldRepresentable: NSViewRepresentable {
 
         context.coordinator.registerFocusObserver()
 
+        // 把 NSSearchField 引用回传给 ToolbarView，供 closeSearch 清理用
+        context.coordinator.onSearchFieldCreated?(searchField)
+
         return searchField
     }
 
@@ -52,7 +75,7 @@ struct SearchFieldRepresentable: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, shouldFocus: $shouldFocus, onEnter: onEnter, onShiftEnter: onShiftEnter)
+        Coordinator(text: $text, shouldFocus: $shouldFocus, onEnter: onEnter, onShiftEnter: onShiftEnter, onFieldCreated: onFieldCreated)
     }
 
     static func dismantleNSView(_ searchField: NSSearchField, coordinator: Coordinator) {
@@ -68,18 +91,13 @@ struct SearchFieldRepresentable: NSViewRepresentable {
         var onSearchFieldCreated: ((NSSearchField) -> Void)?
         private var focusObserver: NSObjectProtocol?
 
-        init(text: Binding<String>, shouldFocus: Binding<Bool>, onEnter: @escaping () -> Void, onShiftEnter: @escaping () -> Void) {
+        init(text: Binding<String>, shouldFocus: Binding<Bool>, onEnter: @escaping () -> Void, onShiftEnter: @escaping () -> Void, onFieldCreated: ((NSSearchField) -> Void)? = nil) {
             self.text = text
             self.shouldFocus = shouldFocus
             self.onEnter = onEnter
             self.onShiftEnter = onShiftEnter
             super.init()
-            // 延迟到下一个 run loop 再回调，避免 makeNSView 期间 SwiftUI 还没完全准备好
-            DispatchQueue.main.async { [weak self] in
-                if let field = self?.searchField {
-                    self?.onSearchFieldCreated?(field)
-                }
-            }
+            self.onSearchFieldCreated = onFieldCreated
         }
 
         deinit {
@@ -305,7 +323,8 @@ struct ToolbarView: View {
                 placeholder: t(.searchPdfPlaceholder),
                 onEnter: { performSearchOrNext() },
                 onShiftEnter: { performSearchOrPrevious() },
-                shouldFocus: $shouldFocusSearchField
+                shouldFocus: $shouldFocusSearchField,
+                onFieldCreated: { field in _currentSearchField = field }
             ).frame(maxWidth: .infinity)
 
             if appState.isSearchActive {

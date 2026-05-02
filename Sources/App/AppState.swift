@@ -156,6 +156,8 @@ class AppState: ObservableObject {
     @Published var currentWordIndex: Int = 0
     @Published var selectedVoiceId: String = "kokoro:af_bella"
     @Published var selectedVoiceName: String = "Kokoro — Bella (Female, Sweet)"
+    /// 转发 TTSService.isKokoroLoading，供 TTS Tab 的 UI 观察
+    var isKokoroLoading: Bool { ttsService.isKokoroLoading }
     
     // MARK: - Word Analysis
     @Published var wordAnalysis: GrammarResult?

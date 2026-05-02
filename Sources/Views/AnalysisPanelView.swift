@@ -488,12 +488,18 @@ struct TTSTabContent: View {
                             appState.startSpeaking()
                         }
                     }) {
-                        Image(systemName: appState.isSpeaking ? "stop.fill" : "play.fill")
-                            .font(.title2)
-                            .foregroundColor(.accentColor)
+                        if appState.isKokoroLoading {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                                .frame(width: 26, height: 26)
+                        } else {
+                            Image(systemName: appState.isSpeaking ? "stop.fill" : "play.fill")
+                                .font(.title2)
+                                .foregroundColor(.accentColor)
+                        }
                     }
                     .buttonStyle(.borderless)
-                    .disabled(appState.selectedText.isEmpty)
+                    .disabled(appState.selectedText.isEmpty || appState.isKokoroLoading)
                     
                     HStack(spacing: 8) {
                         Image(systemName: "tortoise")
